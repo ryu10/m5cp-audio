@@ -57,9 +57,13 @@ void setup() {
   }
 
   // --- I2Sとマイク/スピーカーの初期化 ---
-  M5Cardputer.Mic.begin();
-  M5Cardputer.Speaker.begin();
-
+  // M5Cardputer.Mic.begin();
+  M5Cardputer.Mic.end(); // デフォルト無効化
+  // delay(100);
+  // M5Cardputer.Speaker.begin();
+  // M5Cardputer.Speaker.setVolume(255);
+  M5Cardputer.Speaker.end(); // デフォルト無効化
+  delay(100);
   // すぐに録音を開始
   startRecording();
 }
@@ -101,8 +105,10 @@ void startRecording() {
   
   // スピーカーを無効化し、マイクを有効化
   M5Cardputer.Speaker.end();
-  delay(100); // 確実にスピーカーが停止するように少し待つ
+  M5Cardputer.Speaker.setVolume(255);
+//  delay(100); // 確実にスピーカーが停止するように少し待つ
   M5Cardputer.Mic.begin();
+  delay(1); 
 
   // 書き込み用にファイルを開く
   audioFile = SD.open(audioFilePath, FILE_WRITE);
@@ -153,8 +159,9 @@ void startPlayback() {
 
   // マイクを無効化し、スピーカーを有効化
   M5Cardputer.Mic.end();
-  delay(100); // 確実にマイクが停止するように少し待つ
   M5Cardputer.Speaker.begin();
+  M5Cardputer.Speaker.setVolume(255);
+  delay(1); 
 
   // 読み込み用にファイルを開く
   audioFile = SD.open(audioFilePath, FILE_READ);
@@ -169,6 +176,9 @@ void startPlayback() {
   cfg_out.pin_ws = 43;
   cfg_out.pin_data = 42;
   cfg_out.pin_data_rx = -1; // 使用しない
+  cfg_out.sample_rate = 16000;
+  cfg_out.bits_per_sample = 16;
+  cfg_out.channels = 1;
   i2sOut.begin(cfg_out);
 
   // デコーダーと再生用StreamCopyを開始
