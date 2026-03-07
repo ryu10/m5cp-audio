@@ -1,0 +1,134 @@
+#include <Arduino.h>
+#include <M5Cardputer.h>
+#include <M5Unified.h>
+#include <SD.h>
+#include "AudioTools.h"
+
+File audioFile;
+WAVEncoder wav;            // WAV形式へのエンコーダー
+I2SStream i2s; // I2Sの入出力ストリーム
+EncodedAudioStream out(&audioFile, &wav); // エンコーダーを通した出力
+StreamCopy copier(out, i2s); // マイクからSDファイルへコピーする本体
+EncodedAudioStream out_spk(&i2s, &wav); // デコーダーを通してI2Sへ送るストリーム
+StreamCopy playCopier(out_spk, audioFile);  // SDからデコーダーへコピー
+
+SPIClass SPI2;
+
+
+void stopRecording();
+void playRecording();
+
+void setup() {
+  auto cfg = i2s.defaultConfig(RXTX_MODE);
+
+  M5Cardputer.begin(); 
+  
+  USBSerial.begin(115200);
+  delay(100);
+  
+  USBSerial.println("Initializing SD card...");
+  
+  // CardputerのSDカードピンを明示的に指定
+  // SCK, MISO, MOSI, CS
+  SPI2.begin(40, 39, 14, 12);
+  SPI2.setDataMode(SPI_MODE0);
+  if (!SD.begin(12, SPI2)) {
+    USBSerial.println("SD card mount failed!");
+    while (true) {}
+  }
+  
+  USBSerial.println("SD card mounted");
+  
+  audioFile = SD.open("/recording.wav", FILE_WRITE);
+  if (!audioFile) {
+    USBSerial.println("Failed to open file for writing");
+    while (true) {}
+  }
+  USBSerial.println("Recording file opened");
+
+  // --- ここからI2S設定 ---
+  USBSerial.println("Starting I2S...");
+  cfg.pin_bck = GPIO_NUM_41;
+  cfg.pin_ws = GPIO_NUM_43;
+  cfg.pin_data = GPIO_NUM_42; // Dout (Speaker) ピン
+  cfg.pin_data_rx = GPIO_NUM_46; // マイク入力ピン
+  // cfg.sample_rate = 16000;
+  // cfg.bits_per_sample = 16;
+  // cfg.channels = 1;
+  // ES8311 標準 16bit PCM / モノラル / 16kHz
+  // Audacity での設定例
+  //   エンコーディング (Encoding): Signed 16-bit PCM
+  //   バイト順序 (Byte Order): Little-endian (ESP32-S3の標準)
+  //   チャンネル (Channels): 1 Channel (Mono)
+  //   オフセット (Start offset): 44 バイト
+  //   ※WAVヘッダーが壊れているがデータとして存在する場合は 44 を指定します。完全にヘッダーがない純粋なRAWデータなら 0 です。
+  //   取り込み比率 (Amount to import): 100%
+
+
+  M5Cardputer.Mic.begin(); 
+  M5Cardputer.Speaker.begin(); // スピーカも先に初期化しておく（I2Sのピン設定がスピーカと競合するため）
+
+  out.begin(cfg);
+
+  USBSerial.println("I2S started!");
+  // --- I2Sマイクの設定ここまで ---
+
+  // StreamCopyの初期化
+  copier.begin(audioFile, i2s);
+}
+
+void loop() {
+  M5.update();
+  
+  // I2Sから読み取ったデータをSDカードのファイルにコピーする
+  copier.copy();
+
+  if (M5.BtnA.wasPressed()) {
+    stopRecording();
+    // ここで処理を停止するか、次のアクションを待つ
+    while(true) { 
+      delay(1000); 
+      playRecording();
+    }
+  }
+
+}
+
+void stopRecording() {
+  if (audioFile) {
+    audioFile.close();
+    USBSerial.println("File closed.");
+  }
+  i2s.end(); // I2Sを停止
+  USBSerial.println("Recording stopped.");
+}
+
+void playRecording(){
+  // auto cfg_spk = i2s_spk.defaultConfig(TX_MODE);
+
+  boolean isPlaying = true;
+
+  // スピーカ再生
+  // cfg_spk.pin_bck = GPIO_NUM_41;
+  // cfg_spk.pin_ws = GPIO_NUM_43;
+  // cfg_spk.pin_data = GPIO_NUM_42; // スピーカ出力ピン
+  // i2s_spk.begin(cfg_spk);
+
+  audioFile = SD.open("/recording.wav", FILE_READ);
+
+  M5Cardputer.Speaker.begin();
+  M5Cardputer.Speaker.setVolume(128); // 音量を設定（0-255の範囲で調整）
+  out_spk.begin(cfg);
+
+  while (isPlaying) {
+    if (audioFile && audioFile.available() && isPlaying) {
+      playCopier.copy();
+    } else {
+      isPlaying = false; // 再生終了
+    }
+  }
+
+  audioFile.close();
+  // out_spk.end();
+  // i2s_spk.end();
+}
