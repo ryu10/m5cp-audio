@@ -1,452 +1,296 @@
-// 音声入力を SD カードに保存する
-// .pio/libdeps/m5stack-stamps3/M5Cardputer/examples/Basic/mic_wav_record/mic_wav_record.ino を PlatformIO 用に改変
-
-/*
- * SPDX-FileCopyrightText: 2024 M5Stack Technology CO LTD
- *
- * SPDX-License-Identifier: MIT
- *
- * @Hardwares: M5Cardputer
- * @Platform Version: Arduino M5Stack Board Manager v2.0.7
- * @Dependent Library:
- * M5GFX@^0.2.3: https://github.com/m5stack/M5GFX
- * M5Cardputer@^1.0.3: https://github.com/m5stack/M5Cardputer
- */
+// 音声入力を SD カードに保存する（デュアルコア版）
+//
+// アーキテクチャ:
+//   Core 1 (mic_task): i2s_read() → ping-pong buf[0/1] → FreeRTOS Queue通知 → stop check
+//   Core 0 (loop)    : Queue受信 → file.write(buf) → 波形描画（間引き）→ M5.update() → BtnA check
+//
+// 最大録音サイズ: 16000サンプル/秒 × 2バイト × 3600秒 ≒ 115MB
+// RAM使用量を抑えるため、SDへの書き込みは録音中にリアルタイムで行う。
+// WAVヘッダは録音開始時にダミー値で書き込み、終了時に実際のサイズで上書きする。
+// 波形描画: 100サンプルに1点程度に間引いてCPU負荷を抑える。
 
 #include <Arduino.h>
 #include <M5Cardputer.h>
 #include <SD.h>
 #include <SPI.h>
-#include <esp_heap_caps.h>
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 
 #include "pcm1808.h"
-#define pcm1808_f // PCM1808 を使用する場合はコメントアウトを外す。M5Cardputer 内蔵マイクを使用する場合はコメントアウトしたままにする。
+// #define USE_PCM1808  // PCM1808 外部ADCを使う場合は有効化。無効時は内蔵マイクを使用。
 
-#include <vector>
-
+// ── SD SPI ピン ──────────────────────────────────────────────
 #define SD_SPI_SCK_PIN  (40)
 #define SD_SPI_MISO_PIN (39)
 #define SD_SPI_MOSI_PIN (14)
 #define SD_SPI_CS_PIN   (12)
 
-static constexpr size_t record_number     = 512;
-static constexpr size_t record_length     = 240;
-static constexpr size_t record_size       = record_number * record_length;
-static constexpr size_t record_samplerate = 16000;
+// ── 録音パラメータ ────────────────────────────────────────────
+static constexpr uint32_t SAMPLE_RATE    = 16000;
+static constexpr size_t   CHUNK_SAMPLES  = 512;   // 1チャンクのサンプル数（約32ms @16kHz）
+static constexpr size_t   NUM_BUFFERS    = 2;     // ピンポンバッファ数
 
-static int16_t prev_y[record_length];
-static int16_t prev_h[record_length];
-static size_t rec_record_idx  = 2;
-static size_t draw_record_idx = 0;
-static int16_t* rec_data      = nullptr;
+// ── ピンポンバッファ ──────────────────────────────────────────
+// Core1 が書き込み、Core0 が読み出す。
+// Queue でどちらのバッファが「書き込み完了」かを通知する。
+static int16_t ping_pong[NUM_BUFFERS][CHUNK_SAMPLES];
 
-static uint32_t file_counter     = 0;
-static uint8_t selectedFileIndex = 0;
-static std::vector<String> wavFiles;
+// ── Queue: Core1 → Core0 ─────────────────────────────────────
+// 要素: uint8_t（バッファインデックス 0 or 1）
+// 特殊値 0xFF を「録音終了」シグナルとして使う
+static QueueHandle_t rec_queue = nullptr;
+static constexpr uint8_t QUEUE_STOP_SIGNAL = 0xFF;
 
+// ── 録音状態 ─────────────────────────────────────────────────
+static volatile bool is_recording  = false;
+static volatile bool stop_requested = false;
+
+// ── SD 書き込みファイル ───────────────────────────────────────
+static File     rec_file;
+static uint32_t rec_total_samples = 0;  // 録音済みサンプル数（WAVヘッダ更新用）
+static uint32_t file_counter      = 0;
+
+// ── WAVヘッダ ─────────────────────────────────────────────────
 struct WAVHeader {
-	char riff[4]           = {'R', 'I', 'F', 'F'};
-	uint32_t fileSize      = 0;
-	char wave[4]           = {'W', 'A', 'V', 'E'};
-	char fmt[4]            = {'f', 'm', 't', ' '};
-	uint32_t fmtSize       = 16;
-	uint16_t audioFormat   = 1;
-	uint16_t numChannels   = 1;
-	uint32_t sampleRate    = record_samplerate;
-	uint32_t byteRate      = record_samplerate * sizeof(int16_t);
-	uint16_t blockAlign    = sizeof(int16_t);
-	uint16_t bitsPerSample = 16;
-	char data[4]           = {'d', 'a', 't', 'a'};
-	uint32_t dataSize      = 0;
+	char     riff[4]        = {'R', 'I', 'F', 'F'};
+	uint32_t fileSize       = 0;           // 録音終了後に書き直す
+	char     wave[4]        = {'W', 'A', 'V', 'E'};
+	char     fmt[4]         = {'f', 'm', 't', ' '};
+	uint32_t fmtSize        = 16;
+	uint16_t audioFormat    = 1;           // PCM
+	uint16_t numChannels    = 1;
+	uint32_t sampleRate     = SAMPLE_RATE;
+	uint32_t byteRate       = SAMPLE_RATE * sizeof(int16_t);
+	uint16_t blockAlign     = sizeof(int16_t);
+	uint16_t bitsPerSample  = 16;
+	char     data[4]        = {'d', 'a', 't', 'a'};
+	uint32_t dataSize       = 0;           // 録音終了後に書き直す
 };
 
-bool saveWAVToSD(int16_t* data, size_t dataSize);
-void scanAndDisplayWAVFiles(void);
-bool playWAVFileFromSD(void);
-bool playSelectedWAVFile(const String& fileName);
-void playWAV(void);
-void updateDisplay(const std::vector<String>& files, uint8_t selectedIndex);
-
-// PCM1808 Line In
+// ── PCM1808 ───────────────────────────────────────────────────
+#ifdef USE_PCM1808
 PCM1808 lineIn;
+#endif
 
+// ── 前方宣言 ──────────────────────────────────────────────────
+void mic_task(void* arg);
+bool openRecFile();
+void finalizeRecFile();
+void drawWaveform(const int16_t* buf, size_t len);
+void showStatus(const char* label, uint16_t color);
+
+// ============================================================
+// mic_task  ―  Core 1
+//   役割: ADC/I2S から音声を読み取り、ピンポンバッファに格納して
+//         Core 0 へ Queue 通知する。stop_requested を監視して終了。
+// ============================================================
+void mic_task(void* arg)
+{
+	uint8_t buf_idx = 0;
+
+	while (true) {
+		if (!is_recording) {
+			vTaskDelay(pdMS_TO_TICKS(10));
+			continue;
+		}
+
+		// ここに ADC 読み取りを実装 ─────────────────────────────
+		// 【PCM1808使用時】
+		//   lineIn.read(ping_pong[buf_idx], CHUNK_SAMPLES);
+		// 【内蔵マイク使用時】
+		//   M5Cardputer.Mic.record(ping_pong[buf_idx], CHUNK_SAMPLES, SAMPLE_RATE);
+		// ─────────────────────────────────────────────────────────
+
+		// 書き込み完了バッファのインデックスを Core0 へ通知
+		xQueueSend(rec_queue, &buf_idx, portMAX_DELAY);
+
+		// ピンポン切り替え
+		buf_idx ^= 1;
+
+		// 停止チェック
+		if (stop_requested) {
+			stop_requested = false;
+			is_recording   = false;
+			// 終了シグナルを Core0 へ送る
+			uint8_t sig = QUEUE_STOP_SIGNAL;
+			xQueueSend(rec_queue, &sig, portMAX_DELAY);
+		}
+	}
+}
+
+// ============================================================
+// openRecFile  ―  録音開始時に WAV ファイルをオープンし
+//                 ダミーヘッダを書き込む
+// ============================================================
+bool openRecFile()
+{
+	char filename[32];
+	snprintf(filename, sizeof(filename), "/rec%04lu.wav", file_counter++);
+
+	rec_file = SD.open(filename, FILE_WRITE);
+	if (!rec_file) {
+		printf("Failed to open: %s\n", filename);
+		return false;
+	}
+
+	// ここにダミー WAV ヘッダの書き込みを実装 ──────────────────
+	// WAVHeader hdr;  // dataSize=0 のまま書き込み
+	// rec_file.write(reinterpret_cast<uint8_t*>(&hdr), sizeof(WAVHeader));
+	// ────────────────────────────────────────────────────────────
+
+	rec_total_samples = 0;
+	printf("Opened: %s\n", filename);
+	return true;
+}
+
+// ============================================================
+// finalizeRecFile  ―  録音終了時に WAV ヘッダを実サイズで上書き
+// ============================================================
+void finalizeRecFile()
+{
+	if (!rec_file) return;
+
+	// ここに WAV ヘッダの上書きを実装 ───────────────────────────
+	// uint32_t dataBytes = rec_total_samples * sizeof(int16_t);
+	// WAVHeader hdr;
+	// hdr.dataSize = dataBytes;
+	// hdr.fileSize = 36 + dataBytes;
+	// rec_file.seek(0);
+	// rec_file.write(reinterpret_cast<uint8_t*>(&hdr), sizeof(WAVHeader));
+	// ────────────────────────────────────────────────────────────
+
+	rec_file.close();
+	printf("Finalized. Total samples: %lu\n", rec_total_samples);
+}
+
+// ============================================================
+// drawWaveform  ―  波形描画（100サンプルに1点程度に間引く）
+// ============================================================
+void drawWaveform(const int16_t* buf, size_t len)
+{
+	// ここに波形描画を実装 ────────────────────────────────────────
+	// 推奨: len/100 点程度に間引いて writeFastVLine で描画
+	// 高さ: (sample >> 6) を Display.height()/2 に加算
+	// 前フレームの線を TFT_BLACK で消してから描く
+	// ────────────────────────────────────────────────────────────
+	(void)buf;
+	(void)len;
+}
+
+// ============================================================
+// showStatus  ―  ディスプレイに録音状態を表示
+// ============================================================
+void showStatus(const char* label, uint16_t color)
+{
+	// ここにステータス表示を実装 ─────────────────────────────────
+	// 例: M5Cardputer.Display.fillCircle(70, 15, 8, color);
+	//     M5Cardputer.Display.drawString(label, 120, 3);
+	// ────────────────────────────────────────────────────────────
+	(void)label;
+	(void)color;
+}
+
+// ============================================================
+// setup  ―  Core 0
+// ============================================================
 void setup(void)
 {
 	auto cfg = M5.config();
-
 	M5Cardputer.begin(cfg);
 	Serial.begin(115200);
+
 	M5Cardputer.Display.startWrite();
 	M5Cardputer.Display.setRotation(1);
 	M5Cardputer.Display.setTextDatum(top_center);
 	M5Cardputer.Display.setTextColor(WHITE);
 	M5Cardputer.Display.setFont(&fonts::FreeSansBoldOblique12pt7b);
 
-	// SD card initialization.
+	// SD カード初期化
 	SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
-
 	if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
-		printf("Card failed, or not present\r\n");
-		while (1) {
-			delay(1);
-		}
+		printf("SD init failed\r\n");
+		// ここにエラー表示を実装
+		while (1) { delay(1); }
 	}
+	printf("SD OK - %lluMB\r\n", SD.cardSize() / (1024 * 1024));
 
-	uint8_t cardType = SD.cardType();
-	if (cardType == CARD_NONE) {
-		printf("No SD card attached\r\n");
-		return;
-	}
-
-	printf("SD Card Type: ");
-	if (cardType == CARD_MMC) {
-		printf("MMC\r\n");
-	} else if (cardType == CARD_SD) {
-		printf("SDSC\r\n");
-	} else if (cardType == CARD_SDHC) {
-		printf("SDHC\r\n");
-	} else {
-		printf("UNKNOWN\r\n");
-	}
-
-	uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-	printf("SD Card Size: %lluMB\r\n", cardSize);
-
-	rec_data = static_cast<int16_t*>(
-		heap_caps_malloc(record_size * sizeof(int16_t), MALLOC_CAP_8BIT));
-	if (!rec_data) {
-		printf("Failed to allocate recording buffer\r\n");
-		return;
-	}
-
-	memset(rec_data, 0, record_size * sizeof(int16_t));
-	M5Cardputer.Speaker.setVolume(255);
-	M5Cardputer.Speaker.end();
-#ifdef pcm1808_f
-  // PCM1808 Line In setup
-  // Cardputer EXT port - BCK: 3, LRCK: 4, DIN: 5, MCK: 13
-  lineIn.begin(3, 4, 5, 13);
+	// ADC 初期化
+#ifdef USE_PCM1808
+	// PCM1808 Line In  (EXT port: BCK=3, LRCK=4, DIN=5, MCK=13)
+	lineIn.begin(3, 4, 5, 13);
 #else
 	M5Cardputer.Mic.begin();
 #endif
 
-	scanAndDisplayWAVFiles();
-	updateDisplay(wavFiles, selectedFileIndex);
+	// FreeRTOS Queue 作成（深さ NUM_BUFFERS+1: ストップシグナル分の余裕を持たせる）
+	rec_queue = xQueueCreate(NUM_BUFFERS + 1, sizeof(uint8_t));
+
+	// mic_task を Core 1 に固定して起動
+	xTaskCreatePinnedToCore(
+		mic_task,   // タスク関数
+		"mic_task", // タスク名
+		4096,       // スタックサイズ (bytes)
+		nullptr,    // 引数
+		2,          // 優先度（loop より高め）
+		nullptr,    // タスクハンドル（不要なら nullptr）
+		1           // Core 1
+	);
+
+	showStatus("Ready", WHITE);
+	M5Cardputer.Display.endWrite();
 }
 
+// ============================================================
+// loop  ―  Core 0
+//   役割: BtnA で録音開始/停止トグル。
+//         Queue からバッファを受け取り SD に書き込む。
+//         波形描画、ディスプレイ更新はここで行う。
+// ============================================================
 void loop(void)
 {
 	M5Cardputer.update();
 
-	// Press BtnA to record and then save to SD.
+	// BtnA: 録音開始 / 停止トグル
 	if (M5Cardputer.BtnA.wasClicked()) {
-		M5Cardputer.Display.clear();
-
-#ifdef pcm1808_f
-    if(lineIn.isEnabled() && rec_data) {
-#else
- 		if (M5Cardputer.Mic.isEnabled() && rec_data) {
-#endif
-      M5Cardputer.Display.fillCircle(70, 15, 8, RED);
-			M5Cardputer.Display.drawString("REC", 120, 3);
-
-			static constexpr int shift = 6;
-			for (uint16_t i = 0; i < record_number; i++) {
-				auto data = &rec_data[i * record_length];
-
-#ifdef pcm1808_f
-        lineIn.read(data, record_length);
-        if(true) { // PCM1808 は動機読み取り
-#else
-        if (M5Cardputer.Mic.record(data, record_length, record_samplerate)) {
-#endif
-          if (i >= 2) {
-						data      = &rec_data[(i - 2) * record_length];
-						int32_t w = M5Cardputer.Display.width();
-						if (w > static_cast<int32_t>(record_length - 1)) {
-							w = record_length - 1;
-						}
-
-						for (int32_t x = 0; x < w; ++x) {
-							M5Cardputer.Display.writeFastVLine(x, prev_y[x], prev_h[x], TFT_BLACK);
-							int32_t y1 = (data[x] >> shift);
-							int32_t y2 = (data[x + 1] >> shift);
-							if (y1 > y2) {
-								int32_t tmp = y1;
-								y1          = y2;
-								y2          = tmp;
-							}
-							int32_t y = (M5Cardputer.Display.height() >> 1) + y1;
-							int32_t h = (M5Cardputer.Display.height() >> 1) + y2 + 1 - y;
-							prev_y[x] = y;
-							prev_h[x] = h;
-							M5Cardputer.Display.writeFastVLine(x, prev_y[x], prev_h[x], WHITE);
-						}
-					}
-				}
-
-				M5Cardputer.Display.display();
-				M5Cardputer.Display.fillCircle(70, 15, 8, RED);
-				M5Cardputer.Display.drawString("REC", 120, 3);
+		if (!is_recording) {
+			// ── 録音開始 ─────────────────────────────────────────
+			if (openRecFile()) {
+				is_recording = true;
+				showStatus("REC", RED);
+				printf("Recording started.\n");
 			}
-
-			if (saveWAVToSD(rec_data, record_size)) {
-				printf("WAV file saved successfully.\n");
-			} else {
-				printf("Failed to save WAV file.\n");
-			}
-			M5Cardputer.Display.clear();
-		}
-
-		updateDisplay(wavFiles, selectedFileIndex);
-	}
-
-	scanAndDisplayWAVFiles();
-}
-
-void updateDisplay(const std::vector<String>& files, uint8_t selectedIndex)
-{
-	if (files.empty()) {
-		printf("No WAV files found on SD card.\n");
-		M5Cardputer.Display.fillScreen(BLACK);
-		M5Cardputer.Display.setTextColor(RED);
-		int xPos = M5Cardputer.Display.width() / 2;
-		int yPos = M5Cardputer.Display.height() / 2 - 20;
-		M5Cardputer.Display.drawString("No WAV files found", xPos, yPos);
-		return;
-	}
-
-	const uint8_t maxVisibleFiles = 5;
-	uint8_t startIndex            = 0;
-	if (selectedIndex >= maxVisibleFiles) {
-		startIndex = selectedIndex - (maxVisibleFiles - 1);
-	}
-
-	M5Cardputer.Display.fillScreen(BLACK);
-	for (size_t i = startIndex; i < startIndex + maxVisibleFiles && i < files.size(); i++) {
-		uint16_t color = (i == selectedIndex) ? YELLOW : WHITE;
-		M5Cardputer.Display.setTextColor(color);
-		M5Cardputer.Display.drawString(files[i], M5Cardputer.Display.width() / 2,
-									   3 + (i - startIndex) * 25);
-	}
-}
-
-void scanAndDisplayWAVFiles()
-{
-	static std::vector<String> previousWavFiles;
-
-	File dir = SD.open("/");
-	if (!dir) {
-		printf("Failed to open directory.\n");
-		return;
-	}
-
-	wavFiles.clear();
-	while (File entry = dir.openNextFile()) {
-		if (!entry.isDirectory() && String(entry.name()).endsWith(".wav")) {
-			wavFiles.push_back(String(entry.name()));
-		}
-		entry.close();
-	}
-	dir.close();
-
-	if (!wavFiles.empty() && selectedFileIndex >= wavFiles.size()) {
-		selectedFileIndex = wavFiles.size() - 1;
-	}
-
-	if (wavFiles != previousWavFiles) {
-		previousWavFiles = wavFiles;
-		updateDisplay(wavFiles, selectedFileIndex);
-	}
-
-	if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
-		if (wavFiles.empty()) {
-			return;
-		}
-
-		Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
-		char key                          = 0;
-		for (auto c : status.word) {
-			key = c;
-		}
-
-		if (key == ';') {
-			selectedFileIndex = (selectedFileIndex == 0) ? wavFiles.size() - 1 : selectedFileIndex - 1;
-			updateDisplay(wavFiles, selectedFileIndex);
-		}
-		if (key == '.') {
-			selectedFileIndex = (selectedFileIndex + 1) % wavFiles.size();
-			updateDisplay(wavFiles, selectedFileIndex);
-		}
-
-		if (status.del) {
-			String filePath = "/" + wavFiles[selectedFileIndex];
-			if (SD.remove(filePath.c_str())) {
-				printf("Deleted file: %s\n", filePath.c_str());
-				wavFiles.erase(wavFiles.begin() + selectedFileIndex);
-				if (selectedFileIndex >= wavFiles.size() && !wavFiles.empty()) {
-					selectedFileIndex--;
-				}
-				updateDisplay(wavFiles, selectedFileIndex);
-			} else {
-				printf("Failed to delete file: %s\n", filePath.c_str());
-			}
-		}
-
-		if (status.enter && !wavFiles.empty()) {
-			playSelectedWAVFile(wavFiles[selectedFileIndex]);
+		} else {
+			// ── 録音停止要求 ──────────────────────────────────────
+			stop_requested = true;
+			printf("Stop requested.\n");
 		}
 	}
-}
 
-bool playSelectedWAVFile(const String& fileName)
-{
-	String filePath = fileName.startsWith("/") ? fileName : "/" + fileName;
-	printf("Playing WAV file: %s\n", filePath.c_str());
+	// ── Queue からチャンクを受信して処理 ─────────────────────────
+	uint8_t buf_idx;
+	if (rec_queue && xQueueReceive(rec_queue, &buf_idx, 0) == pdTRUE) {
 
-	File file = SD.open(filePath.c_str());
-	if (!file) {
-		printf("Failed to open WAV file: %s\n", filePath.c_str());
-		return false;
-	}
+		if (buf_idx == QUEUE_STOP_SIGNAL) {
+			// 録音終了シグナル受信
+			finalizeRecFile();
+			showStatus("Done", GREEN);
+			// ここに完了後のファイル一覧更新などを実装
 
-	// Skip WAV header (usually 44 bytes).
-	file.seek(44);
+		} else {
+			// SD にバッファを書き込む
+			// ここに SD 書き込みを実装 ─────────────────────────────
+			// rec_file.write(
+			//     reinterpret_cast<const uint8_t*>(ping_pong[buf_idx]),
+			//     CHUNK_SAMPLES * sizeof(int16_t));
+			// rec_total_samples += CHUNK_SAMPLES;
+			// ────────────────────────────────────────────────────────
 
-	const size_t maxRead = record_size * sizeof(int16_t);
-	size_t bytesRead     = file.read(reinterpret_cast<uint8_t*>(rec_data), maxRead);
-	file.close();
-
-	if (bytesRead == 0) {
-		printf("Failed to read WAV file data.\n");
-		return false;
-	}
-	if (bytesRead < maxRead) {
-		memset(reinterpret_cast<uint8_t*>(rec_data) + bytesRead, 0, maxRead - bytesRead);
-	}
-
-	playWAV();
-	printf("Playback finished.\n");
-	return true;
-}
-
-bool playWAVFileFromSD(void)
-{
-	File dir       = SD.open("/");
-	String wavFile = "";
-
-	while (File entry = dir.openNextFile()) {
-		if (!entry.isDirectory() && String(entry.name()).endsWith(".wav")) {
-			wavFile = "/" + String(entry.name());
-			entry.close();
-			break;
+			// 波形描画（間引き）
+			drawWaveform(ping_pong[buf_idx], CHUNK_SAMPLES);
 		}
-		entry.close();
-	}
-	dir.close();
-
-	if (wavFile == "") {
-		printf("No WAV files found on SD card.\n");
-		return false;
 	}
 
-	printf("Playing WAV file: %s\n", wavFile.c_str());
-	File file = SD.open(wavFile.c_str());
-	if (!file) {
-		printf("Failed to open WAV file: %s\n", wavFile.c_str());
-		return false;
-	}
-
-	file.seek(44);
-	const size_t maxRead = record_size * sizeof(int16_t);
-	size_t bytesRead     = file.read(reinterpret_cast<uint8_t*>(rec_data), maxRead);
-	file.close();
-
-	if (bytesRead == 0) {
-		printf("Failed to read WAV file data.\n");
-		return false;
-	}
-	if (bytesRead < maxRead) {
-		memset(reinterpret_cast<uint8_t*>(rec_data) + bytesRead, 0, maxRead - bytesRead);
-	}
-
-	playWAV();
-	printf("Playback finished.\n");
-	return true;
-}
-
-void playWAV(void)
-{
-	M5Cardputer.Display.clear();
-	M5Cardputer.Mic.end();
-	M5Cardputer.Speaker.begin();
-	M5Cardputer.Display.fillTriangle(70 - 8, 15 - 8, 70 - 8, 15 + 8, 70 + 8, 15, 0x1c9f);
-	M5Cardputer.Display.drawString("PLAY", 120, 3);
-
-	static constexpr int shift = 6;
-	for (uint16_t i = 0; i < record_number; i++) {
-		auto data = &rec_data[i * record_length];
-		M5Cardputer.Speaker.playRaw(&rec_data[i * record_length], record_length, record_samplerate);
-
-		do {
-			delay(1);
-			M5Cardputer.update();
-		} while (M5Cardputer.Speaker.isPlaying());
-
-		if (i >= 2) {
-			data      = &rec_data[(i - 2) * record_length];
-			int32_t w = M5Cardputer.Display.width();
-			if (w > static_cast<int32_t>(record_length - 1)) {
-				w = record_length - 1;
-			}
-
-			for (int32_t x = 0; x < w; ++x) {
-				M5Cardputer.Display.writeFastVLine(x, prev_y[x], prev_h[x], TFT_BLACK);
-				int32_t y1 = (data[x] >> shift);
-				int32_t y2 = (data[x + 1] >> shift);
-				if (y1 > y2) {
-					int32_t tmp = y1;
-					y1          = y2;
-					y2          = tmp;
-				}
-				int32_t y = (M5Cardputer.Display.height() >> 1) + y1;
-				int32_t h = (M5Cardputer.Display.height() >> 1) + y2 + 1 - y;
-				prev_y[x] = y;
-				prev_h[x] = h;
-				M5Cardputer.Display.writeFastVLine(x, prev_y[x], prev_h[x], WHITE);
-			}
-		}
-
-		M5Cardputer.Display.fillTriangle(70 - 8, 15 - 8, 70 - 8, 15 + 8, 70 + 8, 15, 0x1c9f);
-		M5Cardputer.Display.drawString("PLAY", 120, 3);
-	}
-
-	M5Cardputer.Speaker.end();
-#ifndef pcm1808_f
-  M5Cardputer.Mic.begin();
-#endif
-  M5Cardputer.Display.clear();
-	updateDisplay(wavFiles, selectedFileIndex);
-}
-
-bool saveWAVToSD(int16_t* data, size_t dataSize)
-{
-	char filename[32];
-	snprintf(filename, sizeof(filename), "/recorded%lu.wav", file_counter++);
-
-	File file = SD.open(filename, FILE_WRITE);
-	if (!file) {
-		printf("Failed to open file for writing.\n");
-		return false;
-	}
-
-	WAVHeader header;
-	header.fileSize = 36 + dataSize * sizeof(int16_t);
-	header.dataSize = dataSize * sizeof(int16_t);
-
-	file.write(reinterpret_cast<uint8_t*>(&header), sizeof(WAVHeader));
-	file.write(reinterpret_cast<uint8_t*>(data), dataSize * sizeof(int16_t));
-	file.close();
-
-	return true;
+	// ここにキーボード操作（ファイル選択・再生・削除）を実装
 }
