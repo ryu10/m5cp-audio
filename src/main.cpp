@@ -1,8 +1,9 @@
 // 音声入力を SD カードに保存する（デュアルコア版）
 //
 // アーキテクチャ:
-//   Core 1 (mic_task): i2s_read() → ping-pong buf[0/1] → FreeRTOS Queue通知 → stop check
-//   Core 0 (loop)    : Queue受信 → file.write(buf) → 波形描画（間引き）→ M5.update() → BtnA check
+//   Core 1 (loop)   : i2s_read() → ping-pong buf[0/1] → FreeRTOS Queue通知 → M5.update() → BtnA/stop check
+//   Core 0 (sd_task): Queue受信 → file.write(buf) → 波形描画（間引き）
+// ※ setup()/loop() は ESP32 Arduino のデフォルトで Core 1 (loopTask) で動作する
 //
 // 最大録音サイズ: 16000サンプル/秒 × 2バイト × 3600秒 ≒ 115MB
 // RAM使用量を抑えるため、SDへの書き込みは録音中にリアルタイムで行う。
@@ -19,7 +20,7 @@
 #include <freertos/task.h>
 
 #include "pcm1808.h"
-// #define USE_PCM1808  // PCM1808 外部ADCを使う場合は有効化。無効時は内蔵マイクを使用。
+#define USE_PCM1808  // PCM1808 外部ADCを使う場合は有効化。無効時は内蔵マイクを使用。
 
 // ── SD SPI ピン ──────────────────────────────────────────────
 #define SD_SPI_SCK_PIN  (40)
@@ -31,6 +32,8 @@
 static constexpr uint32_t SAMPLE_RATE    = 16000;
 static constexpr size_t   CHUNK_SAMPLES  = 512;   // 1チャンクのサンプル数（約32ms @16kHz）
 static constexpr size_t   NUM_BUFFERS    = 2;     // ピンポンバッファ数
+
+#define MAX_RECORDING_SIZE (SAMPLE_RATE * sizeof(int16_t) * 3600)  // 最大録音サイズ（1時間分）
 
 // ── ピンポンバッファ ──────────────────────────────────────────
 // Core1 が書き込み、Core0 が読み出す。
@@ -51,6 +54,7 @@ static volatile bool stop_requested = false;
 static File     rec_file;
 static uint32_t rec_total_samples = 0;  // 録音済みサンプル数（WAVヘッダ更新用）
 static uint32_t file_counter      = 0;
+static char     filename[32];     // 録音ファイル名格納用
 
 // ── WAVヘッダ ─────────────────────────────────────────────────
 struct WAVHeader {
@@ -75,47 +79,39 @@ PCM1808 lineIn;
 #endif
 
 // ── 前方宣言 ──────────────────────────────────────────────────
-void mic_task(void* arg);
+void sd_task(void* arg);
 bool openRecFile();
 void finalizeRecFile();
 void drawWaveform(const int16_t* buf, size_t len);
-void showStatus(const char* label, uint16_t color);
+void showStatus(const char* label, uint16_t color, const char* status);
 
 // ============================================================
-// mic_task  ―  Core 1
-//   役割: ADC/I2S から音声を読み取り、ピンポンバッファに格納して
-//         Core 0 へ Queue 通知する。stop_requested を監視して終了。
+// sd_task  ―  Core 0
+//   役割: Queue からバッファインデックスを受け取り SD に書き込む。
+//         波形描画もここで行う。QUEUE_STOP_SIGNAL を受けたら
+//         WAV ヘッダを確定してファイルをクローズする。
 // ============================================================
-void mic_task(void* arg)
+void sd_task(void* arg)
 {
-	uint8_t buf_idx = 0;
-
 	while (true) {
-		if (!is_recording) {
-			vTaskDelay(pdMS_TO_TICKS(10));
-			continue;
-		}
+		uint8_t buf_idx;
+		// Queue を待機（portMAX_DELAY でブロック）
+		if (xQueueReceive(rec_queue, &buf_idx, portMAX_DELAY) != pdTRUE) continue;
 
-		// ここに ADC 読み取りを実装 ─────────────────────────────
-		// 【PCM1808使用時】
-		//   lineIn.read(ping_pong[buf_idx], CHUNK_SAMPLES);
-		// 【内蔵マイク使用時】
-		//   M5Cardputer.Mic.record(ping_pong[buf_idx], CHUNK_SAMPLES, SAMPLE_RATE);
-		// ─────────────────────────────────────────────────────────
+		if (buf_idx == QUEUE_STOP_SIGNAL) {
+			// 録音終了シグナル受信 → WAV ヘッダ確定
+			finalizeRecFile();
+			showStatus("Done", GREEN, filename); // サブメッセージにファイル名
+			// ここに完了後のファイル一覧更新などを実装
+		} else {
+			// SD にバッファを書き込む
+			rec_file.write(
+			    reinterpret_cast<const uint8_t*>(ping_pong[buf_idx]),
+			    CHUNK_SAMPLES * sizeof(int16_t));
+			rec_total_samples += CHUNK_SAMPLES;
 
-		// 書き込み完了バッファのインデックスを Core0 へ通知
-		xQueueSend(rec_queue, &buf_idx, portMAX_DELAY);
-
-		// ピンポン切り替え
-		buf_idx ^= 1;
-
-		// 停止チェック
-		if (stop_requested) {
-			stop_requested = false;
-			is_recording   = false;
-			// 終了シグナルを Core0 へ送る
-			uint8_t sig = QUEUE_STOP_SIGNAL;
-			xQueueSend(rec_queue, &sig, portMAX_DELAY);
+			// 波形描画
+			drawWaveform(ping_pong[buf_idx], CHUNK_SAMPLES);
 		}
 	}
 }
@@ -126,8 +122,21 @@ void mic_task(void* arg)
 // ============================================================
 bool openRecFile()
 {
-	char filename[32];
-	snprintf(filename, sizeof(filename), "/rec%04lu.wav", file_counter++);
+	// char filename[32];
+	snprintf(filename, sizeof(filename), "/rec%04lu.wav", file_counter); 
+
+	// もし同名ファイルがあったら file_counter をインクリメントしてユニークな名前にする
+	// 上限は 0999 までとする
+	while (SD.exists(filename) && file_counter < 1000) {
+		file_counter++;
+		snprintf(filename, sizeof(filename), "/rec%04lu.wav", file_counter);
+	}
+	// 1000 に達したらエラーを表示して録音開始を諦める
+	if (file_counter >= 1000) {
+		printf("Too many files. Cannot create new recording.\n");
+		// ここにエラー表示を実装
+		return false;
+	}
 
 	rec_file = SD.open(filename, FILE_WRITE);
 	if (!rec_file) {
@@ -135,10 +144,9 @@ bool openRecFile()
 		return false;
 	}
 
-	// ここにダミー WAV ヘッダの書き込みを実装 ──────────────────
-	// WAVHeader hdr;  // dataSize=0 のまま書き込み
-	// rec_file.write(reinterpret_cast<uint8_t*>(&hdr), sizeof(WAVHeader));
-	// ────────────────────────────────────────────────────────────
+	// ダミー WAV ヘッダの書き込み
+	WAVHeader hdr;  // dataSize=0 のまま書き込み
+	rec_file.write(reinterpret_cast<uint8_t*>(&hdr), sizeof(WAVHeader));
 
 	rec_total_samples = 0;
 	printf("Opened: %s\n", filename);
@@ -152,14 +160,13 @@ void finalizeRecFile()
 {
 	if (!rec_file) return;
 
-	// ここに WAV ヘッダの上書きを実装 ───────────────────────────
-	// uint32_t dataBytes = rec_total_samples * sizeof(int16_t);
-	// WAVHeader hdr;
-	// hdr.dataSize = dataBytes;
-	// hdr.fileSize = 36 + dataBytes;
-	// rec_file.seek(0);
-	// rec_file.write(reinterpret_cast<uint8_t*>(&hdr), sizeof(WAVHeader));
-	// ────────────────────────────────────────────────────────────
+	// WAV ヘッダの上書
+	uint32_t dataBytes = rec_total_samples * sizeof(int16_t);
+	WAVHeader hdr;
+	hdr.dataSize = dataBytes;
+	hdr.fileSize = 36 + dataBytes;
+	rec_file.seek(0);
+	rec_file.write(reinterpret_cast<uint8_t*>(&hdr), sizeof(WAVHeader));
 
 	rec_file.close();
 	printf("Finalized. Total samples: %lu\n", rec_total_samples);
@@ -182,18 +189,24 @@ void drawWaveform(const int16_t* buf, size_t len)
 // ============================================================
 // showStatus  ―  ディスプレイに録音状態を表示
 // ============================================================
-void showStatus(const char* label, uint16_t color)
+void showStatus(const char* label,  uint16_t color, const char* status = "")
 {
-	// ここにステータス表示を実装 ─────────────────────────────────
-	// 例: M5Cardputer.Display.fillCircle(70, 15, 8, color);
-	//     M5Cardputer.Display.drawString(label, 120, 3);
-	// ────────────────────────────────────────────────────────────
+	// まず画面クリア
+	M5Cardputer.Display.fillRect(0, 0, M5Cardputer.Display.width(), M5Cardputer.Display.height(), BLACK);
+	// メッセージ表示
+	M5Cardputer.Display.setFont(&fonts::FreeSansBoldOblique12pt7b);  // 大きいフォントで録音状態を表示
+	M5Cardputer.Display.fillCircle(70, 15, 8, color);
+	M5Cardputer.Display.drawString(label, 120, 3);
+	// ステータスメッセージ表示（より小さいフォントで）	
+	M5Cardputer.Display.setFont(&fonts::FreeSans9pt7b);
+	M5Cardputer.Display.drawString(status, 120, 36);
+
 	(void)label;
 	(void)color;
 }
 
 // ============================================================
-// setup  ―  Core 0
+// setup  ―  Core 1（ESP32 Arduino のデフォルト）
 // ============================================================
 void setup(void)
 {
@@ -227,26 +240,25 @@ void setup(void)
 	// FreeRTOS Queue 作成（深さ NUM_BUFFERS+1: ストップシグナル分の余裕を持たせる）
 	rec_queue = xQueueCreate(NUM_BUFFERS + 1, sizeof(uint8_t));
 
-	// mic_task を Core 1 に固定して起動
+	// sd_task を Core 0 に固定して起動
 	xTaskCreatePinnedToCore(
-		mic_task,   // タスク関数
-		"mic_task", // タスク名
-		4096,       // スタックサイズ (bytes)
-		nullptr,    // 引数
-		2,          // 優先度（loop より高め）
-		nullptr,    // タスクハンドル（不要なら nullptr）
-		1           // Core 1
+		sd_task,   // タスク関数
+		"sd_task", // タスク名
+		4096,      // スタックサイズ (bytes)
+		nullptr,   // 引数
+		1,         // 優先度
+		nullptr,   // タスクハンドル（不要なら nullptr）
+		0          // Core 0
 	);
 
-	showStatus("Ready", WHITE);
+	showStatus("Ready", WHITE, "Press BtnA to record");
 	M5Cardputer.Display.endWrite();
 }
 
 // ============================================================
-// loop  ―  Core 0
-//   役割: BtnA で録音開始/停止トグル。
-//         Queue からバッファを受け取り SD に書き込む。
-//         波形描画、ディスプレイ更新はここで行う。
+// loop  ―  Core 1（ESP32 Arduino のデフォルト）
+//   役割: ADC 読み取り → ピンポンバッファへ格納 → Queue 通知
+//         M5.update() → BtnA で録音開始/停止トグル
 // ============================================================
 void loop(void)
 {
@@ -260,6 +272,9 @@ void loop(void)
 				is_recording = true;
 				showStatus("REC", RED);
 				printf("Recording started.\n");
+			} else {
+				printf("Failed to start recording.\n");
+				// ここにエラー表示を実装
 			}
 		} else {
 			// ── 録音停止要求 ──────────────────────────────────────
@@ -268,27 +283,38 @@ void loop(void)
 		}
 	}
 
-	// ── Queue からチャンクを受信して処理 ─────────────────────────
-	uint8_t buf_idx;
-	if (rec_queue && xQueueReceive(rec_queue, &buf_idx, 0) == pdTRUE) {
+	// 録音最大サイズに達した場合はボタン検知せずに録音停止
+	if (is_recording && rec_total_samples >= (MAX_RECORDING_SIZE / sizeof(int16_t))) {
+		stop_requested = true;
+		printf("Max recording size reached. Stop requested.\n");
+	}
+	
+	if (!is_recording) return;
 
-		if (buf_idx == QUEUE_STOP_SIGNAL) {
-			// 録音終了シグナル受信
-			finalizeRecFile();
-			showStatus("Done", GREEN);
-			// ここに完了後のファイル一覧更新などを実装
+	// ── ADC 読み取り → ピンポンバッファへ格納 → Queue 通知 ──────
+	static uint8_t buf_idx = 0;
 
-		} else {
-			// SD にバッファを書き込む
-			// ここに SD 書き込みを実装 ─────────────────────────────
-			// rec_file.write(
-			//     reinterpret_cast<const uint8_t*>(ping_pong[buf_idx]),
-			//     CHUNK_SAMPLES * sizeof(int16_t));
-			// rec_total_samples += CHUNK_SAMPLES;
-			// ────────────────────────────────────────────────────────
+	// ADC 読み取り
+#ifdef USE_PCM1808
+	lineIn.read(ping_pong[buf_idx], CHUNK_SAMPLES);
+#else
+	M5Cardputer.Mic.record(ping_pong[buf_idx], CHUNK_SAMPLES, SAMPLE_RATE);
+#endif
 
-			// 波形描画（間引き）
-			drawWaveform(ping_pong[buf_idx], CHUNK_SAMPLES);
+	// 書き込み完了バッファのインデックスを Core 0 (sd_task) へ通知
+	if (rec_queue) xQueueSend(rec_queue, &buf_idx, 0);
+
+	// ピンポン切り替え
+	buf_idx ^= 1;
+
+	// 停止チェック
+	if (stop_requested) {
+		stop_requested = false;
+		is_recording   = false;
+		// 終了シグナルを Core 0 (sd_task) へ送る
+		if (rec_queue) {
+			uint8_t sig = QUEUE_STOP_SIGNAL;
+			xQueueSend(rec_queue, &sig, portMAX_DELAY);
 		}
 	}
 
