@@ -114,7 +114,7 @@ void drawTimeIndicator(uint32_t cur_sec, uint32_t total_sec)
 	// ── 再生量棒グラフ（PLAY 時のみ）──────────────────────────────
 	if (total_sec > 0) {
 		const int32_t  barY       = contentBottom - 1;
-		const uint16_t DARK_GREEN = 0x0200;
+		const uint16_t DARK_GREEN = 0x0380;
 		M5Cardputer.Display.drawFastHLine(0, barY, W, DARK_GREEN);
 		const int32_t fillW = (int32_t)((uint64_t)cur_sec * W / total_sec);
 		if (fillW > 0)
