@@ -8,6 +8,8 @@ M5Cardputer オーディオキャプチャ。内蔵マイクおよび Cardputer-
 
 - 16kHz / モノ / 16bit リニア PCM
 - SD カードに WAV 形式で保存
+- 入力：PC1808 ライン入力または内蔵マイク
+- 出力：M5Cardputer-adv ライン出力または内蔵スピーカー（HW切り替え式なので
 
 （以下は To Do）
 
