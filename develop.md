@@ -175,6 +175,9 @@ showStatus("PLAY",  BLUE,  filename, "Press any key to stop");
 
 - **0VU 基準マーカー**: -18dBFS 位置のバー上端 1px 上をシアン 2px で表示
 - **ピークホールド**: 600ms 保持、2dB/フレーム降下、単一セグメント点灯（ゾーン明色）
+- **VU メーター**: REC/PLAY 両画面で表示
+  - REC: `lineIn.read()` 直後・`xQueueSend()` 前（sd_task がバッファに触れていない唯一の瞬間）
+  - PLAY: 1024サンプルチャンクを 512×2 に分割して 2 回呼び、REC と同じ EMA 刻み（~32ms）に合わせる
 - **`computeRMS(buf, samples)`**: main.cpp 内 static 関数、`uint64_t` 累積・16bit 正規化
 
 ---
@@ -199,13 +202,27 @@ void startPlayback(const char* fname);
 bool isPlaybackDone();
 ```
 
-- 再生バッファ: `int16_t play_buf[CHUNK_SAMPLES * 4]` (2048 サンプル)
+- 再生バッファ: `int16_t play_buf[CHUNK_SAMPLES * 2]` (1024 サンプル = ~64ms → ~16fps VU 更新)
 - `M5Cardputer.Speaker.setVolume(200)`
 - 再生終了後の次回録音時に `lineIn.begin(3, 4, 5, 13)` で ADC を再初期化
 
 ---
 
-## 8. 未実装 / TODO
+## 8. 既知の制約・不可能な実装
+
+### REC 中のスピーカーパススルー再生
+
+**試みた実装**: 録音チャンクごとに `Speaker.playRaw()` を呼ぶことでモニタリング再生を実現しようとした。
+
+**失敗原因**: ESP32-S3 の I2S0 (Speaker) と I2S1 (PCM1808 ADC) は内部クロックソース (`PLL_D2_CLK`) を共有している。`Speaker.begin()` が PLL クロック設定を変更すると `i2s_read()` (I2S_NUM_1) が正常動作しなくなり、録音が無音になる。`pcm1808.cpp` の `use_apll = false` 設定のもとでも影響を受ける。
+
+**回避可能条件** (現状では非採用):
+- PCM1808 に外部水晶クロック（MCK 直接供給）を接続し、ESP32-S3 側の PLL に依存しない構成にする
+- または I2S_NUM_0/1 を同一のクロック設定で初期化する（サンプルレートが同一なら可能性あり。要検証）
+
+---
+
+## 9. 未実装 / TODO
 
 | 項目 | 場所 | 概要 |
 |---|---|---|
@@ -218,7 +235,7 @@ bool isPlaybackDone();
 
 ---
 
-## 9. ブランチ・コミット履歴 (主要)
+## 10. ブランチ・コミット履歴 (主要)
 
 | コミット | 内容 |
 |---|---|
@@ -230,12 +247,15 @@ bool isPlaybackDone();
 | `31fb5d0` | タイムインジケーター・プログレスバー・UI ポリッシュ |
 | `36d9d58` | ANSI VU メーター追加（EMA バリスティクス・ピークホールド・ゾーン色） |
 | `b631f8c` | VU メーター 24 セグメント FL 管風リデザイン |
+| `72f4844` | develop.md VU メーターセクション追記 |
+| `e653c28` | REC 画面にも VU メーター表示 |
+| `HEAD`    | PLAY チャンクサイズ半減（~16fps）、EMA 刻みを REC と統一 |
 
 現在の作業ブランチ: `doubleb`
 
 ---
 
-## 10. ビルド・書き込み
+## 11. ビルド・書き込み
 
 ```bash
 # ビルド

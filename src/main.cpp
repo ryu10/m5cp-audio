@@ -56,7 +56,7 @@ static volatile bool is_playing     = false;
 static volatile bool play_requested = false;  // sd_task → loop() への再生開始通知
 
 // ── 再生用バッファ・ファイル ──────────────────────────────────
-static int16_t play_buf[CHUNK_SAMPLES * 4];  // 再生チャンクバッファ（2048サンプル）
+static int16_t play_buf[CHUNK_SAMPLES * 2];  // 再生チャンクバッファ（1024サンプル, ~64ms → ~16fps VU 更新）
 static File    play_file;
 
 // ── SD 書き込みファイル ───────────────────────────────────────
@@ -243,8 +243,13 @@ bool isPlaybackDone()
 				M5Cardputer.Speaker.playRaw(play_buf, n / sizeof(int16_t),
 				                            SAMPLE_RATE, /*stereo=*/false,
 				                            /*repeat=*/1, /*ch=*/0, /*stop=*/false);
-				// チャンク供給ごとに VU メーター更新（自然に ~8fps = 2048samples/16kHz）
-				drawVUMeter(computeRMS(play_buf, n / sizeof(int16_t)));
+				// チャンク供給ごとに VU メーター更新
+			// 1024サンプルを 512×2 に分けて 2 回呼び、REC 時（512サンプル/チャンク）と
+			// 同じ EMA 刻み（~32ms）・ピーク降下速度になるよう合わせる
+			const size_t samples = n / sizeof(int16_t);
+			const size_t half    = samples / 2;
+			drawVUMeter(computeRMS(play_buf,        half));
+			drawVUMeter(computeRMS(play_buf + half, samples - half));
 				return false;
 			}
 		}
