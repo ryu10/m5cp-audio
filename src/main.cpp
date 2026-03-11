@@ -217,6 +217,20 @@ void startPlayback(const char* fname)
 }
 
 // ============================================================
+// computeRMS  ―  バッファの RMS 音量を 0.0〜1.0 で返す
+// ============================================================
+static float computeRMS(const int16_t* buf, size_t samples)
+{
+	if (samples == 0) return 0.0f;
+	uint64_t sum = 0;
+	for (size_t i = 0; i < samples; i++) {
+		int32_t s = buf[i];
+		sum += (uint64_t)(s * s);
+	}
+	return sqrtf((float)sum / (float)samples) / 32768.0f;
+}
+
+// ============================================================
 // isPlaybackDone  ―  再生完了を判定し、途中チャンクを供給する
 // ============================================================
 bool isPlaybackDone()
@@ -229,6 +243,8 @@ bool isPlaybackDone()
 				M5Cardputer.Speaker.playRaw(play_buf, n / sizeof(int16_t),
 				                            SAMPLE_RATE, /*stereo=*/false,
 				                            /*repeat=*/1, /*ch=*/0, /*stop=*/false);
+				// チャンク供給ごとに VU メーター更新（自然に ~8fps = 2048samples/16kHz）
+				drawVUMeter(computeRMS(play_buf, n / sizeof(int16_t)));
 				return false;
 			}
 		}
@@ -345,9 +361,11 @@ void loop(void)
 		play_requested = false;
 		is_playing     = true;
 		showStatus("PLAY", BLUE, filename, "Press any key to stop");
+		resetVUMeter();
 		startPlayback(filename);
-		// 開始直後に t=0 のインジケーターを即時描画
+		// 開始直後に t=0 のインジケーター・VU メーターを即時描画
 		drawTimeIndicator(0, rec_total_samples / SAMPLE_RATE);
+		drawVUMeter(0.0f);
 		printf("Playback started: %s\n", filename);
 	}
 
