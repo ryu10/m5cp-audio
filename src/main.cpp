@@ -47,8 +47,16 @@ static QueueHandle_t rec_queue = nullptr;
 static constexpr uint8_t QUEUE_STOP_SIGNAL = 0xFF;
 
 // ── 録音状態 ─────────────────────────────────────────────────
-static volatile bool is_recording  = false;
+static volatile bool is_recording   = false;
 static volatile bool stop_requested = false;
+
+// ── 再生状態 ─────────────────────────────────────────────────
+static volatile bool is_playing     = false;
+static volatile bool play_requested = false;  // sd_task → loop() への再生開始通知
+
+// ── 再生用バッファ・ファイル ──────────────────────────────────
+static int16_t play_buf[CHUNK_SAMPLES * 4];  // 再生チャンクバッファ（2048サンプル）
+static File    play_file;
 
 // ── SD 書き込みファイル ───────────────────────────────────────
 static File     rec_file;
@@ -84,6 +92,8 @@ bool openRecFile();
 void finalizeRecFile();
 void drawWaveform(const int16_t* buf, size_t len);
 void showStatus(const char* label, uint16_t color, const char* status);
+void startPlayback(const char* fname);
+bool isPlaybackDone();
 
 // ============================================================
 // sd_task  ―  Core 0
@@ -101,8 +111,7 @@ void sd_task(void* arg)
 		if (buf_idx == QUEUE_STOP_SIGNAL) {
 			// 録音終了シグナル受信 → WAV ヘッダ確定
 			finalizeRecFile();
-			showStatus("Done", GREEN, filename); // サブメッセージにファイル名
-			// ここに完了後のファイル一覧更新などを実装
+			play_requested = true;  // loop() に再生開始を通知
 		} else {
 			// SD にバッファを書き込む
 			rec_file.write(
@@ -184,6 +193,66 @@ void drawWaveform(const int16_t* buf, size_t len)
 	// ────────────────────────────────────────────────────────────
 	(void)buf;
 	(void)len;
+}
+
+// ============================================================
+// startPlayback  ―  WAV ファイルをスピーカーで再生開始する
+// ============================================================
+void startPlayback(const char* fname)
+{
+	// I2S ADC を停止してから Speaker を起動（I2S_NUM_1 → I2S_NUM_0 の順で解放）
+#ifdef USE_PCM1808
+	lineIn.end();
+#endif
+
+	play_file = SD.open(fname, FILE_READ);
+	if (!play_file) {
+		printf("startPlayback: failed to open %s\n", fname);
+		is_playing = false;
+		return;
+	}
+
+	// WAV データ部先頭（ヘッダ 44 bytes = sizeof(WAVHeader)）へシーク
+	play_file.seek(sizeof(WAVHeader));
+
+	M5Cardputer.Speaker.begin();
+	M5Cardputer.Speaker.setVolume(200);
+
+	// 最初のチャンクを読み込んで再生開始
+	size_t n = play_file.read(reinterpret_cast<uint8_t*>(play_buf), sizeof(play_buf));
+	if (n > 0) {
+		M5Cardputer.Speaker.playRaw(play_buf, n / sizeof(int16_t),
+		                            SAMPLE_RATE, /*stereo=*/false,
+		                            /*repeat=*/1, /*ch=*/0, /*stop=*/true);
+	} else {
+		play_file.close();
+		M5Cardputer.Speaker.end();
+		is_playing = false;
+	}
+}
+
+// ============================================================
+// isPlaybackDone  ―  再生完了を判定し、途中チャンクを供給する
+// ============================================================
+bool isPlaybackDone()
+{
+	if (!M5Cardputer.Speaker.isPlaying()) {
+		if (play_file && play_file.available()) {
+			// 次のチャンクを供給
+			size_t n = play_file.read(reinterpret_cast<uint8_t*>(play_buf), sizeof(play_buf));
+			if (n > 0) {
+				M5Cardputer.Speaker.playRaw(play_buf, n / sizeof(int16_t),
+				                            SAMPLE_RATE, /*stereo=*/false,
+				                            /*repeat=*/1, /*ch=*/0, /*stop=*/false);
+				return false;
+			}
+		}
+		// ファイル末尾まで再生完了
+		play_file.close();
+		M5Cardputer.Speaker.end();
+		return true;
+	}
+	return false;
 }
 
 // ============================================================
@@ -270,6 +339,10 @@ void loop(void)
 			// ── 録音開始 ─────────────────────────────────────────
 			if (openRecFile()) {
 				is_recording = true;
+#ifdef USE_PCM1808
+				// 再生時に end() した I2S ADC を再初期化
+				lineIn.begin(3, 4, 5, 13);
+#endif
 				showStatus("REC", RED);
 				printf("Recording started.\n");
 			} else {
@@ -288,7 +361,24 @@ void loop(void)
 		stop_requested = true;
 		printf("Max recording size reached. Stop requested.\n");
 	}
-	
+
+	// ── 再生フロー ───────────────────────────────────────────────
+	// sd_task が finalizeRecFile() 完了後に play_requested をセット
+	if (play_requested && !is_playing) {
+		play_requested = false;
+		is_playing     = true;
+		showStatus("PLAY", BLUE, filename);
+		startPlayback(filename);  // TODO: 実装予定
+		printf("Playback started: %s\n", filename);
+	}
+
+	// 再生完了 → 初期状態に戻る
+	if (is_playing && isPlaybackDone()) {  // TODO: isPlaybackDone() 実装予定
+		is_playing = false;
+		showStatus("Ready", WHITE, "Press BtnA to record");
+		printf("Playback finished. Ready.\n");
+	}
+
 	if (!is_recording) return;
 
 	// ── ADC 読み取り → ピンポンバッファへ格納 → Queue 通知 ──────
