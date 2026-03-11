@@ -136,6 +136,8 @@ void showStatus(const char* label, uint16_t color,
                 const char* sub = "", const char* hint = "");
 void drawWaveform(const int16_t* buf, size_t len);
 void drawTimeIndicator(uint32_t cur_sec, uint32_t total_sec);
+void drawVUMeter(float rms);   // rms: 0.0〜1.0 (computeRMS() の戻り値)
+void resetVUMeter();           // 再生開始時にバリスティクス状態をリセット
 ```
 
 ### 各フォントの用途
@@ -157,7 +159,27 @@ showStatus("PLAY",  BLUE,  filename, "Press any key to stop");
 
 ---
 
-## 5. タイムインジケーター (drawTimeIndicator)
+## 5. VU メーター (drawVUMeter)
+
+- **配置**: サブ行下端〜タイムインジケーター上端の空白帯（上下 4px パディング）
+- **スタイル**: 24 セグメント + 2px ギャップ（FL 蛍光管風）
+- **バリスティクス**: EMA α=0.1 → τ≈300ms（ANSI C16.5 VU 仕様相当）
+- **表示範囲**: -40dBFS〜0dBFS
+- **ゾーン色**:
+
+| ゾーン | 点灯色 | 消灯（暗）色 | ピーク色 |
+|---|---|---|---|
+| -40〜-20 dBFS | `0x05C0` (明緑) | `0x0060` (暗緑) | `GREEN` |
+| -20〜-3 dBFS  | `GREEN`         | `0x0100` (暗緑) | `GREEN` |
+| -3〜0 dBFS    | `YELLOW`        | `0x2100` (暗黄) | `YELLOW` |
+
+- **0VU 基準マーカー**: -18dBFS 位置のバー上端 1px 上をシアン 2px で表示
+- **ピークホールド**: 600ms 保持、2dB/フレーム降下、単一セグメント点灯（ゾーン明色）
+- **`computeRMS(buf, samples)`**: main.cpp 内 static 関数、`uint64_t` 累積・16bit 正規化
+
+---
+
+## 6. タイムインジケーター (drawTimeIndicator)
 
 - **REC モード** (`total_sec == 0`): `"mm:ss"` のみ表示、バーなし
 - **PLAY モード** (`total_sec > 0`): `"mm:ss / mm:ss"` + y=109 に 1px プログレスバー
@@ -166,7 +188,7 @@ showStatus("PLAY",  BLUE,  filename, "Press any key to stop");
 
 ---
 
-## 6. 再生実装 (startPlayback / isPlaybackDone)
+## 7. 再生実装 (startPlayback / isPlaybackDone)
 
 ```cpp
 // 開始: lineIn.end() → SD.open() → seek(sizeof(WAVHeader)) → Speaker.begin() → playRaw()
@@ -183,7 +205,7 @@ bool isPlaybackDone();
 
 ---
 
-## 7. 未実装 / TODO
+## 8. 未実装 / TODO
 
 | 項目 | 場所 | 概要 |
 |---|---|---|
@@ -196,7 +218,7 @@ bool isPlaybackDone();
 
 ---
 
-## 8. ブランチ・コミット履歴 (主要)
+## 9. ブランチ・コミット履歴 (主要)
 
 | コミット | 内容 |
 |---|---|
@@ -206,12 +228,14 @@ bool isPlaybackDone();
 | `148a833` | UI を ui.h/ui.cpp に分離 |
 | `7dec374` | 再生中キー押下での暴走バグ修正 |
 | `31fb5d0` | タイムインジケーター・プログレスバー・UI ポリッシュ |
+| `36d9d58` | ANSI VU メーター追加（EMA バリスティクス・ピークホールド・ゾーン色） |
+| `b631f8c` | VU メーター 24 セグメント FL 管風リデザイン |
 
 現在の作業ブランチ: `doubleb`
 
 ---
 
-## 9. ビルド・書き込み
+## 10. ビルド・書き込み
 
 ```bash
 # ビルド
