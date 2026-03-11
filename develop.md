@@ -1,8 +1,99 @@
-# m5cp-audio — 開発骨子ドキュメント
+# m5cp-audio — 開発骨子
 
-将来のセッションで即座に開発を再開できるよう、アーキテクチャ・ピン配置・コード構造・未実装項目を記録する。
+ブランチ: `doubleb` / ビルド: `pio run` / 書き込み: `pio run --target upload`
 
 ---
+
+## ハードウェア
+
+| | |
+|---|---|
+| ボード | M5Stack StampS3 (ESP32-S3) + M5Cardputer |
+| 表示 | M5GFX 240×135px rotation=1 |
+| ADC | PCM1808 I2S_NUM_1 (BCK=3, LRCK=4, DIN=5, MCK=13) |
+| Speaker | I2S_NUM_0 (内蔵) |
+| SD | SPI (SCK=40, MISO=39, MOSI=14, CS=12) |
+
+**⚠️ I2S 制約**: I2S0/I2S1 が PLL クロックを共有。`Speaker.begin()` と `lineIn.begin()` の同時稼働不可 → REC 中パススルー再生は実現不可。
+
+---
+
+## ソース構成
+
+| ファイル | 役割 |
+|---|---|
+| `src/main.cpp` | ステートマシン・録音/再生・VU 計算 |
+| `src/ui.h / ui.cpp` | 全表示関数 |
+| `src/pcm1808.h / .cpp` | I2S ADC ドライバ |
+
+---
+
+## アーキテクチャ
+
+```
+Core1 (loop):    lineIn.read() → ping_pong[buf_idx] → xQueueSend → VUMeter更新
+Core0 (sd_task): xQueueReceive → file.write() → (0xFF受信) → finalize → play_requested=true
+```
+
+ステートマシン: `Ready → REC → (finalize) → PLAY → Ready`  
+トリガー: `BtnA.wasClicked()` または任意キー押下
+
+---
+
+## 画面レイアウト (240×135)
+
+```
+y=0   Header H=20  "CP Recorder"
+y=20  Content H=90
+        ● label (FreeSansBoldOblique12pt7b)  +2px
+        sub     (Font2)                       +2px
+        [VU meter 24seg FL管風]               動的算出・上下4px pad
+        mm:ss / mm:ss (FreeSansOblique9pt7b)  下端-2px-fh
+y=109  progress bar 1px
+y=110  Footer H=25  hint (FreeSans9pt7b)  bg=0x536E
+```
+
+UI 定数: `UI_HEADER_H=20` / `UI_FOOTER_H=25` / `UI_VU_XL=4`
+
+---
+
+## VU メーター仕様
+
+- 24 セグメント + 2px ギャップ、-40〜0dBFS
+- EMA α=0.1 (τ≈300ms)、ピークホールド 600ms→2dB/frame 降下
+- -18dBFS = 0VU 基準: バー上端にシアン 2px マーカー
+- ゾーン: 暗緑`0x0060`/明緑`0x05C0` | 暗緑`0x0100`/`GREEN` | 暗黄`0x2100`/`YELLOW`
+- REC: `lineIn.read()` 直後・`xQueueSend()` 前に更新（~31fps）
+- PLAY: 1024サンプルチャンクを 512×2 分割で呼び、EMA 刻みを REC と統一 (~16fps)
+
+---
+
+## 録音フォーマット
+
+16kHz / 16bit mono / `/rec0000.wav`〜`/rec0999.wav` / 最大1時間 / WAVヘッダは終了時上書き
+
+---
+
+## TODO
+
+| 項目 | 場所 |
+|---|---|
+| `drawWaveform()` 実装 | `ui.cpp` (現在スタブ) |
+| SD/録音開始失敗のエラー表示 | `setup()` / `loop()` |
+| ファイル選択 UI | 未実装 |
+| `file_counter` 永続化 | 未実装 |
+
+---
+
+## 最近のコミット
+
+| コミット | 内容 |
+|---|---|
+| `36d9d58` | ANSI VU メーター追加 |
+| `b631f8c` | 24 セグメント FL 管風リデザイン |
+| `e653c28` | REC 画面にも VU 表示 |
+| `68fc1fb` | PLAY ~16fps 調整・パススルー限界を develop.md に記録 |
+
 
 ## 1. ハードウェア
 
