@@ -23,7 +23,8 @@ void drawChrome()
 
 // ============================================================
 // showStatus  ―  画面をリフレッシュして状態を表示
-//   コンテンツエリア (y=20..109, 90px) に縦中央揃えで描画
+//   コンテンツエリア (y=20..109, 90px) にラベルを縦中央揃えで描画
+//   ヒントテキスト（status）はフッター内に描画
 // ============================================================
 void showStatus(const char* label, uint16_t color, const char* status)
 {
@@ -36,16 +37,18 @@ void showStatus(const char* label, uint16_t color, const char* status)
 	M5Cardputer.Display.fillRect(0, 0, W, H, BLACK);
 	drawChrome();
 
-	// ── コンテンツエリア縦中央揃え ────────────────────────────
-	// ラベル行 (FreeSansBoldOblique12pt7b ≈ 18px) + gap 6px
-	// + サブ行  (FreeSans9pt7b           ≈ 14px)
-	// = ブロック計 38px
-	static constexpr int32_t BLOCK_H = 38;
-	static constexpr int32_t LABEL_H = 18;
-	static constexpr int32_t GAP     = 6;
-	const int32_t labelY  = contentY + (contentH - BLOCK_H) / 2; // ≈ 46
-	const int32_t statusY = labelY + LABEL_H + GAP;               // ≈ 70
-	const int32_t cx      = W / 2;                                 // 120
+	// ── フッターへヒントテキスト描画 ──────────────────────────────
+	if (status && status[0]) {
+		M5Cardputer.Display.setFont(&fonts::FreeSans9pt7b);
+		M5Cardputer.Display.setTextDatum(middle_center);
+		M5Cardputer.Display.setTextColor(WHITE);
+		M5Cardputer.Display.drawString(status, W / 2, H - UI_FOOTER_H / 2);
+	}
+
+	// ── コンテンツエリア縦中央（ラベル行のみ）─────────────────────
+	static constexpr int32_t LABEL_H = 18; // FreeSansBoldOblique12pt7b ≈ 18px
+	const int32_t labelY = contentY + (contentH - LABEL_H) / 2; // ≈ 56
+	const int32_t cx     = W / 2;                                // 120
 
 	// カラーインジケーター円（ラベル行の左側）
 	M5Cardputer.Display.fillCircle(cx - 60, labelY + LABEL_H / 2, 7, color);
@@ -55,11 +58,6 @@ void showStatus(const char* label, uint16_t color, const char* status)
 	M5Cardputer.Display.setTextDatum(top_center);
 	M5Cardputer.Display.setTextColor(WHITE);
 	M5Cardputer.Display.drawString(label, cx + 15, labelY);
-
-	// サブステータス行（top_center）
-	M5Cardputer.Display.setFont(&fonts::FreeSans9pt7b);
-	M5Cardputer.Display.setTextDatum(top_center);
-	M5Cardputer.Display.drawString(status, cx, statusY);
 }
 
 // ============================================================

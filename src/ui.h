@@ -7,7 +7,7 @@
 // 画面解像度: 240×135 (rotation=1)
 static constexpr int32_t  UI_HEADER_H  = 20;    // ヘッダー高さ
 static constexpr int32_t  UI_FOOTER_H  = 25;    // フッター高さ
-static constexpr uint16_t UI_FOOTER_BG = 0xAEDC; // 薄い水色 (#ADD8E6)
+static constexpr uint16_t UI_FOOTER_BG = 0x536E; // 濃いティールブルー (#506C70)
 
 // ヘッダー・フッターを描画する（showStatus から毎回呼ばれる）
 void drawChrome();

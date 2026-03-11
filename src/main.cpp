@@ -293,17 +293,27 @@ void setup(void)
 // ============================================================
 // loop  ―  Core 1（ESP32 Arduino のデフォルト）
 //   役割: ADC 読み取り → ピンポンバッファへ格納 → Queue 通知
-//         M5.update() → BtnA または任意キーで録音開始/停止トグル
+//         M5.update() → BtnA または任意キーで状態遷移
+//           再生中  → 再生停止して入力待ちへ
+//           入力待ち → 録音開始
+//           録音中  → 録音停止要求
 // ============================================================
 void loop(void)
 {
 	M5Cardputer.update();
 
-	// BtnA または任意キー：録音開始 / 停止トグル
 	const bool trigger = M5Cardputer.BtnA.wasClicked() ||
 	                     (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed());
 	if (trigger) {
-		if (!is_recording) {
+		if (is_playing) {
+			// ── 再生停止 ──────────────────────────────────────────
+			M5Cardputer.Speaker.stop();
+			M5Cardputer.Speaker.end();
+			play_file.close();
+			is_playing = false;
+			showStatus("Ready", WHITE, "Press any key to record");
+			printf("Playback stopped by user.\n");
+		} else if (!is_recording) {
 			// ── 録音開始 ─────────────────────────────────────────
 			if (openRecFile()) {
 				is_recording = true;
@@ -376,5 +386,4 @@ void loop(void)
 		}
 	}
 
-	// ここにキーボード操作（ファイル選択・再生・削除）を実装
 }
