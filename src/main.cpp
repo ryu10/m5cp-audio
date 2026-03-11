@@ -336,7 +336,9 @@ void loop(void)
 				// 再生時に end() した I2S ADC を再初期化
 				lineIn.begin(3, 4, 5, 13);
 #endif
+				resetVUMeter();
 				showStatus("REC", RED, "", "Press any key to stop");
+				drawVUMeter(0.0f);
 				printf("Recording started.\n");
 			} else {
 				printf("Failed to start recording.\n");
@@ -414,6 +416,8 @@ void loop(void)
 #endif
 
 	// 書き込み完了バッファのインデックスを Core 0 (sd_task) へ通知
+	// VU メーター更新: Queue 送信前の今が buf_idx に sd_task が触れていない唯一の瞬間
+	drawVUMeter(computeRMS(ping_pong[buf_idx], CHUNK_SAMPLES));
 	if (rec_queue) xQueueSend(rec_queue, &buf_idx, 0);
 
 	// ピンポン切り替え
