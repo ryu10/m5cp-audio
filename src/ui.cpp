@@ -9,11 +9,11 @@ void drawChrome()
 	const int32_t H = M5Cardputer.Display.height();  // 135
 
 	// ── ヘッダー ──────────────────────────────────────────────
-	// 背景は BLACK（全画面クリア済み）、左端に "RECORDER"
+	// 背景は BLACK（全画面クリア済み）、左端に "CP Recorder"
 	M5Cardputer.Display.setFont(&fonts::FreeSans9pt7b);
 	M5Cardputer.Display.setTextDatum(top_left);
 	M5Cardputer.Display.setTextColor(WHITE);
-	M5Cardputer.Display.drawString("RECORDER", 5, 3);
+	M5Cardputer.Display.drawString("CP Recorder", 5, 3);
 	// ヘッダー下境界線
 	M5Cardputer.Display.drawFastHLine(0, UI_HEADER_H - 1, W, (uint16_t)0x4208); // ダークグレー
 
@@ -23,10 +23,11 @@ void drawChrome()
 
 // ============================================================
 // showStatus  ―  画面をリフレッシュして状態を表示
-//   コンテンツエリア (y=20..109, 90px) にラベルを縦中央揃えで描画
-//   ヒントテキスト（status）はフッター内に描画
+//   sub  : ラベル直下 2px に表示するコンテンツエリア内サブ行
+//   hint : フッターに表示する操作ガイド
 // ============================================================
-void showStatus(const char* label, uint16_t color, const char* status)
+void showStatus(const char* label, uint16_t color,
+                const char* sub, const char* hint)
 {
 	const int32_t W        = M5Cardputer.Display.width();    // 240
 	const int32_t H        = M5Cardputer.Display.height();   // 135
@@ -37,32 +38,89 @@ void showStatus(const char* label, uint16_t color, const char* status)
 	M5Cardputer.Display.fillRect(0, 0, W, H, BLACK);
 	drawChrome();
 
-	// ── フッターへヒントテキスト描画 ──────────────────────────────
-	if (status && status[0]) {
+	// ── フッターへ操作ガイド描画 ──────────────────────────────
+	if (hint && hint[0]) {
 		M5Cardputer.Display.setFont(&fonts::FreeSans9pt7b);
 		M5Cardputer.Display.setTextDatum(middle_center);
 		M5Cardputer.Display.setTextColor(WHITE);
-		M5Cardputer.Display.drawString(status, W / 2, H - UI_FOOTER_H / 2);
+		M5Cardputer.Display.drawString(hint, W / 2, H - UI_FOOTER_H / 2);
 	}
 
-	// ── コンテンツエリア縦中央（ラベル行のみ）─────────────────────
-	static constexpr int32_t LABEL_H = 18; // FreeSansBoldOblique12pt7b ≈ 18px
-	const int32_t labelY = contentY + (contentH - LABEL_H) / 2; // ≈ 56
-	const int32_t cx     = W / 2;                                // 120
+	// ── コンテンツエリア上端揃え ──────────────────────────────────────
+	// ラベル行: コンテンツ上端 + 2px
+	// サブ行:   ラベル行下端 + 2px
+	static constexpr int32_t GAP = 2;
+	const bool hasSub = sub && sub[0];
 
-	// カラーインジケーター円（ラベル行の左側）
-	M5Cardputer.Display.fillCircle(cx - 60, labelY + LABEL_H / 2, 7, color);
+	// フォントをセットしてから実際の行高さを取得
+	M5Cardputer.Display.setFont(&fonts::FreeSansBoldOblique12pt7b);
+	const int32_t labelH = M5Cardputer.Display.fontHeight();
+	M5Cardputer.Display.setFont(&fonts::FreeSans9pt7b);
+	const int32_t subH   = M5Cardputer.Display.fontHeight();
 
-	// ラベル（top_center）
+	const int32_t labelY = contentY + GAP;
+	const int32_t cx     = W / 2; // 120
+
+	// カラーインジケーター円
+	M5Cardputer.Display.fillCircle(cx - 60, labelY + labelH / 2, 7, color);
+
+	// ラベル
 	M5Cardputer.Display.setFont(&fonts::FreeSansBoldOblique12pt7b);
 	M5Cardputer.Display.setTextDatum(top_center);
 	M5Cardputer.Display.setTextColor(WHITE);
 	M5Cardputer.Display.drawString(label, cx + 15, labelY);
+
+	// サブ行（ラベル下端 + GAP）- 小サイズビットマップフォント（太め）
+	if (hasSub) {
+		M5Cardputer.Display.setFont(&fonts::Font2);
+		M5Cardputer.Display.setTextDatum(top_center);
+		M5Cardputer.Display.drawString(sub, cx, labelY + labelH + GAP);
+	}
+	(void)subH;
 }
 
 // ============================================================
-// drawWaveform  ―  波形描画（100サンプルに1点程度に間引く）
+// drawTimeIndicator  ―  コンテンツエリア下端に時間を描画
+//   total_sec > 0 : "mm:ss / mm:ss" + プログレスバー（PLAY 用）
+//   total_sec == 0: "mm:ss" のみ（REC 用）
 // ============================================================
+void drawTimeIndicator(uint32_t cur_sec, uint32_t total_sec)
+{
+	const int32_t W            = M5Cardputer.Display.width();  // 240
+	const int32_t H            = M5Cardputer.Display.height(); // 135
+	const int32_t contentBottom = H - UI_FOOTER_H;             // 110
+
+	M5Cardputer.Display.setFont(&fonts::FreeSansOblique9pt7b);  // イタリック
+	const int32_t fh = M5Cardputer.Display.fontHeight();
+	const int32_t y  = contentBottom - 2 - fh; // 下端から 2px
+
+	// 前フレームを消去
+	M5Cardputer.Display.fillRect(0, y, W, fh, BLACK);
+
+	char buf[20];
+	if (total_sec > 0) {
+		snprintf(buf, sizeof(buf), "%02lu:%02lu / %02lu:%02lu",
+		         cur_sec / 60, cur_sec % 60,
+		         total_sec / 60, total_sec % 60);
+	} else {
+		snprintf(buf, sizeof(buf), "%02lu:%02lu",
+		         cur_sec / 60, cur_sec % 60);
+	}
+
+	M5Cardputer.Display.setTextDatum(top_center);
+	M5Cardputer.Display.setTextColor(GREEN);
+	M5Cardputer.Display.drawString(buf, W / 2, y);
+
+	// ── 再生量棒グラフ（PLAY 時のみ）──────────────────────────────
+	if (total_sec > 0) {
+		const int32_t  barY       = contentBottom - 1;
+		const uint16_t DARK_GREEN = 0x0200;
+		M5Cardputer.Display.drawFastHLine(0, barY, W, DARK_GREEN);
+		const int32_t fillW = (int32_t)((uint64_t)cur_sec * W / total_sec);
+		if (fillW > 0)
+			M5Cardputer.Display.drawFastHLine(0, barY, fillW, GREEN);
+	}
+}
 void drawWaveform(const int16_t* buf, size_t len)
 {
 	// ここに波形描画を実装 ────────────────────────────────────────

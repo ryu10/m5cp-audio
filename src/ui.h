@@ -13,7 +13,15 @@ static constexpr uint16_t UI_FOOTER_BG = 0x536E; // 濃いティールブルー 
 void drawChrome();
 
 // 画面をリフレッシュして状態ラベルとサブ行を表示する
-void showStatus(const char* label, uint16_t color, const char* status = "");
+//   sub  : ラベル直下 2px に表示するサブ行（コンテンツエリア内）
+//   hint : フッターに表示する操作ガイド
+void showStatus(const char* label, uint16_t color,
+                const char* sub = "", const char* hint = "");
 
 // 波形描画（100サンプルに1点程度に間引く）
 void drawWaveform(const int16_t* buf, size_t len);
+
+// 再生中タイムインジケータをコンテンツエリア下端に描画する
+//   cur_sec   : 現在の再生位置（秒）
+//   total_sec : 総再生時間（秒）
+void drawTimeIndicator(uint32_t cur_sec, uint32_t total_sec);

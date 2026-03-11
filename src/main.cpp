@@ -286,8 +286,7 @@ void setup(void)
 		0          // Core 0
 	);
 
-	showStatus("Ready", WHITE, "Press any key to record");
-	M5Cardputer.Display.endWrite();
+	showStatus("Ready", WHITE, "", "Press any key to record");
 }
 
 // ============================================================
@@ -311,7 +310,7 @@ void loop(void)
 			M5Cardputer.Speaker.end();
 			play_file.close();
 			is_playing = false;
-			showStatus("Ready", WHITE, "Press any key to record");
+			showStatus("Ready", WHITE, "", "Press any key to record");
 			printf("Playback stopped by user.\n");
 		} else if (!is_recording) {
 			// ── 録音開始 ─────────────────────────────────────────
@@ -321,7 +320,7 @@ void loop(void)
 				// 再生時に end() した I2S ADC を再初期化
 				lineIn.begin(3, 4, 5, 13);
 #endif
-				showStatus("REC", RED);
+				showStatus("REC", RED, "", "Press any key to stop");
 				printf("Recording started.\n");
 			} else {
 				printf("Failed to start recording.\n");
@@ -345,19 +344,46 @@ void loop(void)
 	if (play_requested && !is_playing) {
 		play_requested = false;
 		is_playing     = true;
-		showStatus("PLAY", BLUE, filename);
-		startPlayback(filename);  // TODO: 実装予定
+		showStatus("PLAY", BLUE, filename, "Press any key to stop");
+		startPlayback(filename);
+		// 開始直後に t=0 のインジケーターを即時描画
+		drawTimeIndicator(0, rec_total_samples / SAMPLE_RATE);
 		printf("Playback started: %s\n", filename);
 	}
 
 	// 再生完了 → 初期状態に戻る
-	if (is_playing && isPlaybackDone()) {  // TODO: isPlaybackDone() 実装予定
+	if (is_playing && isPlaybackDone()) {
 		is_playing = false;
-		showStatus("Ready", WHITE, "Press any key to record");
+		showStatus("Ready", WHITE, "", "Press any key to record");
 		printf("Playback finished. Ready.\n");
 	}
 
+	// 再生中タイムインジケーター・棒グラフを 1 秒ごとに更新
+	if (is_playing) {
+		static uint32_t last_ui_ms = 0;
+		const uint32_t now = millis();
+		if (now - last_ui_ms >= 1000) {
+			last_ui_ms = now;
+			const uint32_t played_bytes =
+				(play_file.position() > sizeof(WAVHeader))
+				? play_file.position() - sizeof(WAVHeader) : 0;
+			const uint32_t cur_sec   = played_bytes / (SAMPLE_RATE * sizeof(int16_t));
+			const uint32_t total_sec = rec_total_samples / SAMPLE_RATE;
+			drawTimeIndicator(cur_sec, total_sec);
+		}
+	}
+
 	if (!is_recording) return;
+
+	// 録音中タイムインジケーターを 1 秒ごとに更新（合計・バーなし）
+	{
+		static uint32_t rec_ui_ms = 0;
+		const uint32_t now = millis();
+		if (now - rec_ui_ms >= 1000) {
+			rec_ui_ms = now;
+			drawTimeIndicator(rec_total_samples / SAMPLE_RATE, 0);
+		}
+	}
 
 	// ── ADC 読み取り → ピンポンバッファへ格納 → Queue 通知 ──────
 	static uint8_t buf_idx = 0;
