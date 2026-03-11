@@ -320,21 +320,23 @@ void setup(void)
 		0          // Core 0
 	);
 
-	showStatus("Ready", WHITE, "Press BtnA to record");
+	showStatus("Ready", WHITE, "Press any key to record");
 	M5Cardputer.Display.endWrite();
 }
 
 // ============================================================
 // loop  ―  Core 1（ESP32 Arduino のデフォルト）
 //   役割: ADC 読み取り → ピンポンバッファへ格納 → Queue 通知
-//         M5.update() → BtnA で録音開始/停止トグル
+//         M5.update() → BtnA または任意キーで録音開始/停止トグル
 // ============================================================
 void loop(void)
 {
 	M5Cardputer.update();
 
-	// BtnA: 録音開始 / 停止トグル
-	if (M5Cardputer.BtnA.wasClicked()) {
+	// BtnA または任意キー：録音開始 / 停止トグル
+	const bool trigger = M5Cardputer.BtnA.wasClicked() ||
+	                     (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed());
+	if (trigger) {
 		if (!is_recording) {
 			// ── 録音開始 ─────────────────────────────────────────
 			if (openRecFile()) {
@@ -375,7 +377,7 @@ void loop(void)
 	// 再生完了 → 初期状態に戻る
 	if (is_playing && isPlaybackDone()) {  // TODO: isPlaybackDone() 実装予定
 		is_playing = false;
-		showStatus("Ready", WHITE, "Press BtnA to record");
+		showStatus("Ready", WHITE, "Press any key to record");
 		printf("Playback finished. Ready.\n");
 	}
 
