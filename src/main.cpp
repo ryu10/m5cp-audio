@@ -1,14 +1,17 @@
-// 音声入力を SD カードに保存する（デュアルコア版）
+// 音声入力を SD カードに録音・再生するアプリ（デュアルコア版）
 //
 // アーキテクチャ:
-//   Core 1 (loop)   : i2s_read() → ping-pong buf[0/1] → FreeRTOS Queue通知 → M5.update() → BtnA/stop check
-//   Core 0 (sd_task): Queue受信 → file.write(buf) → 波形描画（間引き）
+//   Core 1 (loop)   : i2s_read() → ping-pong buf[0/1] → FreeRTOS Queue 通知
+//                     M5.update() → キー/BtnA 判定 → 状態遷移
+//   Core 0 (sd_task): Queue 受信 → SD write → VU メーター更新
+//                     録音終了シグナル受信 → WAV ヘッダ確定 → 再生通知
 // ※ setup()/loop() は ESP32 Arduino のデフォルトで Core 1 (loopTask) で動作する
 //
 // 最大録音サイズ: 16000サンプル/秒 × 2バイト × 3600秒 ≒ 115MB
 // RAM使用量を抑えるため、SDへの書き込みは録音中にリアルタイムで行う。
 // WAVヘッダは録音開始時にダミー値で書き込み、終了時に実際のサイズで上書きする。
-// 波形描画: 100サンプルに1点程度に間引いてCPU負荷を抑える。
+//
+// 画面状態: Ready ←→ Browse / REC → PLAY → Ready
 
 #include <Arduino.h>
 #include <M5Cardputer.h>
@@ -101,8 +104,9 @@ bool isPlaybackDone();
 // ============================================================
 // sd_task  ―  Core 0
 //   役割: Queue からバッファインデックスを受け取り SD に書き込む。
-//         波形描画もここで行う。QUEUE_STOP_SIGNAL を受けたら
-//         WAV ヘッダを確定してファイルをクローズする。
+//         VU メーター更新もここで行う。QUEUE_STOP_SIGNAL を受けたら
+//         WAV ヘッダを確定・クローズし、カレントファイルを更新して
+//         loop() に再生開始を通知する。
 // ============================================================
 void sd_task(void* arg)
 {
@@ -123,7 +127,7 @@ void sd_task(void* arg)
 			    CHUNK_SAMPLES * sizeof(int16_t));
 			rec_total_samples += CHUNK_SAMPLES;
 
-			// 波形描画
+			// VU メーター更新（REC 画面）
 			drawWaveform(ping_pong[buf_idx], CHUNK_SAMPLES);
 		}
 	}
@@ -135,19 +139,15 @@ void sd_task(void* arg)
 // ============================================================
 bool openRecFile()
 {
-	// char filename[32];
-	snprintf(filename, sizeof(filename), "/rec%04lu.wav", file_counter); 
+	snprintf(filename, sizeof(filename), "/rec%04lu.wav", file_counter);
 
-	// もし同名ファイルがあったら file_counter をインクリメントしてユニークな名前にする
-	// 上限は 0999 までとする
+	// 同名ファイルがあれば file_counter をインクリメントしてユニークな名前にする（上限 0999）
 	while (SD.exists(filename) && file_counter < 1000) {
 		file_counter++;
 		snprintf(filename, sizeof(filename), "/rec%04lu.wav", file_counter);
 	}
-	// 1000 に達したらエラーを表示して録音開始を諦める
 	if (file_counter >= 1000) {
 		printf("Too many files. Cannot create new recording.\n");
-		// ここにエラー表示を実装
 		return false;
 	}
 
@@ -173,7 +173,7 @@ void finalizeRecFile()
 {
 	if (!rec_file) return;
 
-	// WAV ヘッダの上書
+	// WAV ヘッダを上書き（dataSize / fileSize を実サイズで確定）
 	uint32_t dataBytes = rec_total_samples * sizeof(int16_t);
 	WAVHeader hdr;
 	hdr.dataSize = dataBytes;
@@ -190,7 +190,7 @@ void finalizeRecFile()
 // ============================================================
 void startPlayback(const char* fname)
 {
-	// I2S ADC を停止してから Speaker を起動（I2S_NUM_1 → I2S_NUM_0 の順で解放）
+	// PCM1808 I2S ADC を停止してからスピーカー I2S を起動（リソース競合を避けるため）
 #ifdef USE_PCM1808
 	lineIn.end();
 #endif
@@ -249,8 +249,7 @@ bool isPlaybackDone()
 				                            SAMPLE_RATE, /*stereo=*/false,
 				                            /*repeat=*/1, /*ch=*/0, /*stop=*/false);
 				// チャンク供給ごとに VU メーター更新
-			// 1024サンプルを 512×2 に分けて 2 回呼び、REC 時（512サンプル/チャンク）と
-			// 同じ EMA 刻み（~32ms）・ピーク降下速度になるよう合わせる
+			// 1024サンプルを 512×2 に分割して REC 時（512サンプル）と EMA 刻みを揃える
 			const size_t samples = n / sizeof(int16_t);
 			const size_t half    = samples / 2;
 			drawVUMeter(computeRMS(play_buf,        half));
@@ -285,7 +284,6 @@ void setup(void)
 	SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
 	if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
 		printf("SD init failed\r\n");
-		// ここにエラー表示を実装
 		while (1) { delay(1); }
 	}
 	printf("SD OK - %lluMB\r\n", SD.cardSize() / (1024 * 1024));
@@ -324,11 +322,20 @@ void setup(void)
 
 // ============================================================
 // loop  ―  Core 1（ESP32 Arduino のデフォルト）
-//   役割: ADC 読み取り → ピンポンバッファへ格納 → Queue 通知
-//         M5.update() → BtnA または任意キーで状態遷移
-//           再生中  → 再生停止して入力待ちへ
-//           入力待ち → 録音開始
-//           録音中  → 録音停止要求
+//   役割: M5.update() → キー/BtnA 入力解析 → 画面状態に応じた遷移
+//
+//   Ready 状態:
+//     F キー          → Browse（ファイルブラウザ）へ
+//     R キー / BtnA   → REC（新規録音）へ
+//     その他のキー    → PLAY（カレントファイルを再生）へ
+//   Browse 状態:
+//     ; / .           → リスト上下移動
+//     ` (Esc)         → カレントファイル変更なしで Ready へ
+//     その他 / Enter  → 選択ファイルをカレントにして Ready へ
+//   REC 状態:
+//     任意キー        → 録音停止要求（Core 0 が WAV 確定後 PLAY へ）
+//   PLAY 状態:
+//     任意キー        → 再生停止して Ready へ
 // ============================================================
 void loop(void)
 {
@@ -393,7 +400,7 @@ void loop(void)
 				if (openRecFile()) {
 					is_recording = true;
 #ifdef USE_PCM1808
-					// 再生時に end() した I2S ADC を再初期化
+					// 録音開始後 I2S ADC を再初期化（PLAY 時に lineIn.end() しているため）
 					lineIn.begin(3, 4, 5, 13);
 #endif
 					resetVUMeter();
@@ -437,15 +444,14 @@ void loop(void)
 		printf("Max recording size reached. Stop requested.\n");
 	}
 
-	// ── 再生フロー ───────────────────────────────────────────────
-	// sd_task が finalizeRecFile() 完了後に play_requested をセット
+	// ── 録音後の自動再生フロー ─────────────────────────────────────
+	// sd_task が WAV 確定後に play_requested をセットする
 	if (play_requested && !is_playing) {
 		play_requested = false;
 		is_playing     = true;
 		showStatus("PLAY", BLUE, filename, "Press any key to stop");
 		resetVUMeter();
 		startPlayback(filename);
-		// 開始直後に t=0 のインジケーター・VU メーターを即時描画
 		drawTimeIndicator(0, rec_total_samples / SAMPLE_RATE);
 		drawVUMeter(0.0f);
 		printf("Playback started: %s\n", filename);
@@ -485,7 +491,7 @@ void loop(void)
 		}
 	}
 
-	// ── ADC 読み取り → ピンポンバッファへ格納 → Queue 通知 ──────
+	// ── ADC 読み取り → ピンポンバッファへ書き込み → Queue 通知 ──
 	static uint8_t buf_idx = 0;
 
 	// ADC 読み取り
@@ -495,8 +501,7 @@ void loop(void)
 	M5Cardputer.Mic.record(ping_pong[buf_idx], CHUNK_SAMPLES, SAMPLE_RATE);
 #endif
 
-	// 書き込み完了バッファのインデックスを Core 0 (sd_task) へ通知
-	// VU メーター更新: Queue 送信前の今が buf_idx に sd_task が触れていない唯一の瞬間
+	// VU メーター更新（Queue 送信前 = buf_idx に sd_task が触れていない唯一の瞬間）
 	drawVUMeter(computeRMS(ping_pong[buf_idx], CHUNK_SAMPLES));
 	if (rec_queue) xQueueSend(rec_queue, &buf_idx, 0);
 
@@ -507,7 +512,7 @@ void loop(void)
 	if (stop_requested) {
 		stop_requested = false;
 		is_recording   = false;
-		// 終了シグナルを Core 0 (sd_task) へ送る
+		// 録音終了シグナルを Core 0 (sd_task) へ送る → finalizeRecFile() が走る
 		if (rec_queue) {
 			uint8_t sig = QUEUE_STOP_SIGNAL;
 			xQueueSend(rec_queue, &sig, portMAX_DELAY);
