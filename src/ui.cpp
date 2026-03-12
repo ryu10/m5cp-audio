@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "config.h"
 #include <SD.h>
 
 // ============================================================
@@ -15,6 +16,25 @@ void drawChrome()
 	M5Cardputer.Display.setTextDatum(top_left);
 	M5Cardputer.Display.setTextColor(WHITE);
 	M5Cardputer.Display.drawString("CP Recorder", 5, 3);
+
+	// ── RMT インジケータ（有効時のみ: 右上に角丸赤地+黄文字）────
+	int32_t badgeRight = W - 2;  // バッジ右端 X（右から積み上げ）
+	auto drawBadge = [&](const char* text, uint16_t bg, uint16_t fg) {
+		M5Cardputer.Display.setFont(&fonts::Font2);
+		const int32_t textW  = M5Cardputer.Display.textWidth(text);
+		const int32_t BADGE_H = 11;
+		const int32_t BADGE_R = 2;
+		const int32_t bw = textW + 2;
+		const int32_t bx = badgeRight - bw;
+		const int32_t by = (UI_HEADER_H - BADGE_H) / 2;
+		M5Cardputer.Display.fillRoundRect(bx, by, bw, BADGE_H, BADGE_R, bg);
+		M5Cardputer.Display.setTextDatum(middle_center);
+		M5Cardputer.Display.setTextColor(fg);
+		M5Cardputer.Display.drawString(text, bx + bw / 2, by + BADGE_H / 2);
+		badgeRight = bx - 2;  // 次のバッジはさらに左
+	};
+	if (g_config.use_rmt) drawBadge("rmt", RED,  YELLOW);
+
 	// ヘッダー下境界線
 	M5Cardputer.Display.drawFastHLine(0, UI_HEADER_H - 1, W, (uint16_t)0x4208); // ダークグレー
 
@@ -396,4 +416,139 @@ void drawVUMeter(float rms)
 		}
 		M5Cardputer.Display.fillRect(sx, vuY, segW, vuH, color);
 	}
+}
+
+// ============================================================
+// 設定画面  ―  ini ファイルパラメータの確認・変更 UI
+//   ファイルブラウザと同じフォント・デザインを使用する。
+//   current_file は参照専用（left/right を押しても変化しない）。
+// ============================================================
+struct SettingsItem {
+	const char* key;
+	bool        readonly;
+};
+static const SettingsItem SETTINGS_ITEMS[] = {
+	{ "current_file",  true  },
+	{ "skip_silence",  false },
+	{ "use_rmt",       false },
+};
+static constexpr int SETTINGS_COUNT = (int)(sizeof(SETTINGS_ITEMS) / sizeof(SETTINGS_ITEMS[0]));
+
+static AppConfig s_cfg_edit;
+static int       s_cfg_sel = 0;
+
+static void getSettingValue(int idx, char* buf, size_t buflen)
+{
+	buf[0] = '\0';
+	switch (idx) {
+		case 0:
+			strncpy(buf, s_cfg_edit.current_file[0] ? s_cfg_edit.current_file : "(none)",
+			        buflen - 1);
+			buf[buflen - 1] = '\0';
+			break;
+		case 1:
+			strncpy(buf, s_cfg_edit.skip_silence ? "Yes" : "No", buflen - 1);
+			break;
+		case 2:
+			strncpy(buf, s_cfg_edit.use_rmt ? "Yes" : "No", buflen - 1);
+			break;
+		default:
+			break;
+	}
+}
+
+void initSettingsScreen()
+{
+	s_cfg_edit = g_config;
+	s_cfg_sel  = 0;
+}
+
+// ============================================================
+// showSettingsScreen  ―  設定項目一覧を描画
+// ============================================================
+void showSettingsScreen()
+{
+	const int32_t W        = M5Cardputer.Display.width();    // 240
+	const int32_t H        = M5Cardputer.Display.height();   // 135
+	const int32_t contentY = UI_HEADER_H;                    // 20
+
+	M5Cardputer.Display.fillRect(0, 0, W, H, BLACK);
+	drawChrome();
+
+	// ── フッター（ファイルブラウザ準拠）───────────────────────────
+	{
+		const int32_t fy = H - UI_FOOTER_H / 2;
+		const int32_t ts = 5;
+		M5Cardputer.Display.setFont(&fonts::FreeSans9pt7b);
+		M5Cardputer.Display.setTextColor(WHITE);
+		M5Cardputer.Display.setTextDatum(middle_left);
+
+		// ▲ ;
+		M5Cardputer.Display.fillTriangle(
+			13, fy - ts,  8, fy + ts, 18, fy + ts, ORANGE);
+		M5Cardputer.Display.drawString(";", 22, fy);
+
+		// ▼ .
+		M5Cardputer.Display.fillTriangle(
+			44, fy + ts, 39, fy - ts, 49, fy - ts, ORANGE);
+		M5Cardputer.Display.drawString(".", 53, fy);
+
+		// ,/=val トグル
+		M5Cardputer.Display.drawString(",/=chg", 65, fy);
+
+		// `=esc  any=ok（右寄せ）
+		M5Cardputer.Display.setTextDatum(middle_right);
+		M5Cardputer.Display.drawString("`=esc  any=ok", W - 4, fy);
+	}
+
+	// ── 設定項目リスト ──────────────────────────────────────────
+	M5Cardputer.Display.setFont(&fonts::Font2);
+	const int32_t lineH = M5Cardputer.Display.fontHeight() + 2;
+
+	for (int i = 0; i < SETTINGS_COUNT; i++) {
+		const int32_t y    = contentY + 2 + i * lineH;
+		const bool    sel  = (i == s_cfg_sel);
+		const bool    isRO = SETTINGS_ITEMS[i].readonly;
+
+		if (sel) {
+			const uint16_t bg = isRO ? (uint16_t)0x7BEF : (uint16_t)CYAN;
+			M5Cardputer.Display.fillRect(0, y, W, lineH - 1, bg);
+			M5Cardputer.Display.setTextColor(BLACK);
+		} else {
+			M5Cardputer.Display.setTextColor(isRO ? (uint16_t)0x4208 : WHITE);
+		}
+
+		M5Cardputer.Display.setFont(&fonts::Font2);
+		M5Cardputer.Display.setTextDatum(top_left);
+		M5Cardputer.Display.drawString(SETTINGS_ITEMS[i].key, 4, y);
+
+		char valBuf[36];
+		getSettingValue(i, valBuf, sizeof(valBuf));
+		M5Cardputer.Display.setTextDatum(top_right);
+		M5Cardputer.Display.drawString(valBuf, W - 4, y);
+	}
+}
+
+void settingsMoveUp()   { if (s_cfg_sel > 0)                  s_cfg_sel--; }
+void settingsMoveDown() { if (s_cfg_sel < SETTINGS_COUNT - 1) s_cfg_sel++; }
+
+void settingsToggle()
+{
+	if (SETTINGS_ITEMS[s_cfg_sel].readonly) return;
+	switch (s_cfg_sel) {
+		case 1: s_cfg_edit.skip_silence = !s_cfg_edit.skip_silence; break;
+		case 2: s_cfg_edit.use_rmt      = !s_cfg_edit.use_rmt;      break;
+		default: break;
+	}
+}
+
+bool settingsCommit()
+{
+	const bool changed = (s_cfg_edit.skip_silence != g_config.skip_silence ||
+	                      s_cfg_edit.use_rmt      != g_config.use_rmt);
+	if (changed) {
+		g_config.skip_silence = s_cfg_edit.skip_silence;
+		g_config.use_rmt      = s_cfg_edit.use_rmt;
+	}
+	return changed;
 }

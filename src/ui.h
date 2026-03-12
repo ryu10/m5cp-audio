@@ -52,3 +52,16 @@ void drawVUMeter(float rms);
 
 // VU メーター内部状態（平滑化値・ピーク）をリセット（再生開始時に呼ぶ）
 void resetVUMeter();
+
+// ── 設定画面（ini ファイルパラメータの確認・変更）─────────────────────────
+// 編集用コピーを g_config から作成し、選択位置をリセットする
+void initSettingsScreen();
+// 設定項目一覧を描画する
+void showSettingsScreen();
+// フォーカスを上 / 下に移動する
+void settingsMoveUp();
+void settingsMoveDown();
+// 選択中の項目の値を反転する（readonly 項目は無視）
+void settingsToggle();
+// 編集内容を g_config に書き戻す（true = 変更あり）
+bool settingsCommit();

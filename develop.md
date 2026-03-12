@@ -22,8 +22,9 @@
 
 | ファイル | 役割 |
 |---|---|
-| `src/main.cpp` | ステートマシン・録音/再生・VU 計算 |
-| `src/ui.h / ui.cpp` | 全表示関数 |
+| `src/main.cpp` | ステートマシン・録音/再生・VU 計算・RMT デバウンス |
+| `src/ui.h / ui.cpp` | 全表示関数（ステータス/ブラウザ/設定/VUメーター） |
+| `src/config.h / .cpp` | INI ファイル読み書き (`AppConfig`) |
 | `src/pcm1808.h / .cpp` | I2S ADC ドライバ |
 
 ---
@@ -35,7 +36,13 @@ Core1 (loop):    lineIn.read() → ping_pong[buf_idx] → xQueueSend → VUMeter
 Core0 (sd_task): xQueueReceive → file.write() → (0xFF受信) → finalize → play_requested=true
 ```
 
-ステートマシン: `Ready → REC → (finalize) → PLAY → Ready`  
+ステートマシン:
+```
+Ready ←→ Browse
+      ←→ Settings
+      →  RMT Wait → (G6=L) → REC → (finalize) → PLAY → Ready
+      →  REC → (finalize) → PLAY → Ready
+```
 トリガー: `BtnA.wasClicked()` または任意キー押下
 
 ---
@@ -43,7 +50,7 @@ Core0 (sd_task): xQueueReceive → file.write() → (0xFF受信) → finalize �
 ## 画面レイアウト (240×135)
 
 ```
-y=0   Header H=20  "CP Recorder"
+y=0   Header H=20  "CP Recorder"  [rmt バッジ: RMT有効時のみ右端に赤地黄文字]
 y=20  Content H=90
         ● label (FreeSansBoldOblique12pt7b)  +2px
         sub     (Font2)                       +2px
@@ -74,13 +81,35 @@ UI 定数: `UI_HEADER_H=20` / `UI_FOOTER_H=25` / `UI_VU_XL=4`
 
 ---
 
+## 設定ファイル (`/<APP_NAME>_config.ini`)
+
+| キー | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `current_file` | string | (空) | 最後に録音/選択した WAV ファイルパス |
+| `skip_silence` | bool | No | 冒頭無音スキップ (未実装) |
+| `use_rmt` | bool | No | RMT スイッチ使用 |
+
+設定画面: Ready で `S` キー → `;`/`.` で移動、`,`/`/` で Yes/No 切り替え、Enter/他キーで保存、`` ` `` でキャンセル。`current_file` は参照専用。
+
+---
+
+## RMT スイッチ仕様
+
+- GPIO6 (`INPUT_PULLUP`)、通常 H / ON で L
+- デバウンス 80 ms（ファイルスコープ変数で実装、ループ先頭で 1 回読み）
+- `use_rmt=Yes` + `R` キー押下時 G6=H なら `rmt_waiting` 状態へ遷移し `RMT Wait` 画面表示
+- G6=L 検出で録音開始、G6=H 復帰で録音停止
+- RMT Wait 中も任意キーでキャンセル可
+- ヘッダー右端に `rmt` バッジ（赤地・黄文字・Font2）を常時表示
+
+---
+
 ## TODO
 
 | 項目 | 場所 |
 |---|---|
 | `drawWaveform()` 実装 | `ui.cpp` (現在スタブ) |
 | SD/録音開始失敗のエラー表示 | `setup()` / `loop()` |
-| ファイル選択 UI | 未実装 |
 | `file_counter` 永続化 | 未実装 |
 
 ---
@@ -93,4 +122,7 @@ UI 定数: `UI_HEADER_H=20` / `UI_FOOTER_H=25` / `UI_VU_XL=4`
 | `b631f8c` | 24 セグメント FL 管風リデザイン |
 | `e653c28` | REC 画面にも VU 表示 |
 | `68fc1fb` | PLAY ~16fps 調整・パススルー限界を develop.md に記録 |
+| —        | RMT スイッチ対応（GPIO6 デバウンス 80ms） |
+| —        | 設定画面 (S キー)・INI 読み書き |
+| —        | ヘッダー RMT バッジ表示 |
 

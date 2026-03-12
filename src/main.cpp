@@ -22,6 +22,7 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 
+#include "config.h"
 #include "pcm1808.h"
 #include "ui.h"
 #define USE_PCM1808  // PCM1808 外部ADCを使う場合は有効化。無効時は内蔵マイクを使用。
@@ -31,6 +32,10 @@
 #define SD_SPI_MISO_PIN (39)
 #define SD_SPI_MOSI_PIN (14)
 #define SD_SPI_CS_PIN   (12)
+
+// ── RMT スイッチ ─────────────────────────────────────────────
+#define RMT_SWITCH_PIN     (6)    // ADV G6: INPUT_PULLUP / 通常 H、スイッチ ON で L
+#define RMT_DEBOUNCE_MS    (80u)  // リレーバウンス対策デバウンス時間（ms）
 
 // ── 録音パラメータ ────────────────────────────────────────────
 static constexpr uint32_t SAMPLE_RATE    = 16000;
@@ -56,6 +61,17 @@ static volatile bool stop_requested = false;
 
 // ── ブラウザ状態 ──────────────────────────────────────────────
 static bool is_browsing = false;
+
+// ── RMT 待機状態 ──────────────────────────────────────────────
+static bool rmt_waiting = false;  // RMT モードで G6=L 待ち中
+
+// ── 設定画面状態 ─────────────────────────────────────────────
+static bool is_settings = false;  // 設定画面表示中
+
+// ── RMT デバウンス状態 ───────────────────────────────────────
+static int      rmt_raw_prev   = HIGH;  // 前回の RAW 読み値
+static uint32_t rmt_edge_ms    = 0;     // エッジ検出時刻
+static int      rmt_debounced  = HIGH;  // デバウンス済み確定値
 
 // ── 再生状態 ─────────────────────────────────────────────────
 static volatile bool is_playing     = false;
@@ -119,6 +135,9 @@ void sd_task(void* arg)
 			// 録音終了シグナル受信 → WAV ヘッダ確定
 			finalizeRecFile();
 			strncpy(current_file, filename, sizeof(current_file));
+			// 設定ファイルに保存
+			strncpy(g_config.current_file, current_file, sizeof(g_config.current_file));
+			saveConfig();
 			play_requested = true;  // loop() に再生開始を通知
 		} else {
 			// SD にバッファを書き込む
@@ -288,12 +307,14 @@ void setup(void)
 	}
 	printf("SD OK - %lluMB\r\n", SD.cardSize() / (1024 * 1024));
 
-	// カレントファイル初期化（起動時は /rec0000.wav を選択。なければ空ファイルを作成）
-	strncpy(current_file, "/rec0000.wav", sizeof(current_file));
-	if (!SD.exists(current_file)) {
-		File f = SD.open(current_file, FILE_WRITE);
-		if (f) f.close();
-	}
+	// 設定ファイル読み込み（なければデフォルト値で新規作成）
+	loadConfig();
+
+	// カレントファイル初期化（設定ファイルの値を使用）
+	strncpy(current_file, g_config.current_file, sizeof(current_file));
+
+	// RMT スイッチ入力設定（GPIO6: プルアップ = 通常 H）
+	pinMode(RMT_SWITCH_PIN, INPUT_PULLUP);
 
 	// ADC 初期化
 #ifdef USE_PCM1808
@@ -317,7 +338,7 @@ void setup(void)
 		0          // Core 0
 	);
 
-	showStatus("Ready", WHITE, current_file, "[F] Browse  [R] Rec  [key] Play");
+	showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
 }
 
 // ============================================================
@@ -326,12 +347,18 @@ void setup(void)
 //
 //   Ready 状態:
 //     F キー          → Browse（ファイルブラウザ）へ
+//     S キー          → Settings（設定画面）へ
 //     R キー / BtnA   → REC（新規録音）へ
 //     その他のキー    → PLAY（カレントファイルを再生）へ
 //   Browse 状態:
 //     ; / .           → リスト上下移動
 //     ` (Esc)         → カレントファイル変更なしで Ready へ
 //     その他 / Enter  → 選択ファイルをカレントにして Ready へ
+//   Settings 状態:
+//     ; / .           → フォーカス上下移動
+//     , / /           → 設定値切り替え（Yes/No）
+//     ` (Esc)         → キャンセル（変更破棄）して Ready へ
+//     Enter / その他  → 変更を保存して Ready へ
 //   REC 状態:
 //     任意キー        → 録音停止要求（Core 0 が WAV 確定後 PLAY へ）
 //   PLAY 状態:
@@ -340,6 +367,18 @@ void setup(void)
 void loop(void)
 {
 	M5Cardputer.update();
+
+	// RMT スイッチ デバウンス（毎ループ先頭で 1 回だけ読む）
+	if (g_config.use_rmt) {
+		const int raw = digitalRead(RMT_SWITCH_PIN);
+		if (raw != rmt_raw_prev) {
+			rmt_raw_prev = raw;
+			rmt_edge_ms  = millis();
+		}
+		if ((millis() - rmt_edge_ms) >= RMT_DEBOUNCE_MS) {
+			rmt_debounced = raw;
+		}
+	}
 
 	// キー入力を解析
 	char pressedChar  = 0;
@@ -354,6 +393,7 @@ void loop(void)
 	const bool trigger_f = (pressedChar == 'f' || pressedChar == 'F');
 	const bool trigger_r = M5Cardputer.BtnA.wasClicked() ||
 	                       (pressedChar == 'r' || pressedChar == 'R');
+	const bool trigger_s = (pressedChar == 's' || pressedChar == 'S');
 
 	if (trigger) {
 		if (is_playing) {
@@ -362,7 +402,7 @@ void loop(void)
 			M5Cardputer.Speaker.end();
 			play_file.close();
 			is_playing = false;
-			showStatus("Ready", WHITE, current_file, "[F] Browse  [R] Rec  [key] Play");
+			showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
 			printf("Playback stopped by user.\n");
 		} else if (is_browsing) {
 			if (pressedChar == ';') {
@@ -376,17 +416,48 @@ void loop(void)
 			} else if (pressedChar == '`') {
 				// ── ブラウザ → Ready（Esc: 選択変更なし）──────────
 				is_browsing = false;
-				showStatus("Ready", WHITE, current_file, "[F] Browse  [R] Rec  [key] Play");
+				showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
 				printf("Browse cancelled.\n");
 			} else {
 				// ── ブラウザ → Ready（決定: カレントファイル更新）──
 				const char* sel = browseSelectedFile();
 				if (sel) {
 					snprintf(current_file, sizeof(current_file), "/%s", sel);
+					// 設定ファイルに保存
+					strncpy(g_config.current_file, current_file, sizeof(g_config.current_file));
+					saveConfig();
 				}
 				is_browsing = false;
-				showStatus("Ready", WHITE, current_file, "[F] Browse  [R] Rec  [key] Play");
+				showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
 				printf("Browse selected: %s\n", current_file);
+			}
+		} else if (rmt_waiting) {
+			// ── RMT 待機キャンセル ─────────────────────────────────
+			rmt_waiting = false;
+			showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
+			printf("RMT wait cancelled.\n");
+		} else if (is_settings) {
+			// ── 設定画面: キー入力処理 ──────────────────────────────
+			if (pressedChar == ';') {
+				settingsMoveUp();
+				showSettingsScreen();
+			} else if (pressedChar == '.') {
+				settingsMoveDown();
+				showSettingsScreen();
+			} else if (pressedChar == ',' || pressedChar == '/') {
+				settingsToggle();
+				showSettingsScreen();
+			} else if (pressedChar == '`') {
+				// ── 設定キャンセル（変更破棄）─────────────────────────
+				is_settings = false;
+				showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
+				printf("Settings cancelled.\n");
+			} else {
+				// ── 設定保存して閉じる ──────────────────────────────
+				if (settingsCommit()) saveConfig();
+				is_settings = false;
+				showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
+				printf("Settings saved.\n");
 			}
 		} else if (!is_recording) {
 			if (trigger_f) {
@@ -394,10 +465,19 @@ void loop(void)
 				is_browsing = true;
 				initFileBrowser(current_file);
 				showFileBrowser();
-				printf("File browser opened.\n");
-			} else if (trigger_r) {
+				printf("File browser opened.\n");			} else if (trigger_s) {
+				// ── 設定画面へ遷移 ──────────────────────────────────────────
+				is_settings = true;
+				initSettingsScreen();
+				showSettingsScreen();
+				printf("Settings opened.\n");			} else if (trigger_r) {
 				// ── 新規録音開始 ──────────────────────────────────
-				if (openRecFile()) {
+				if (g_config.use_rmt && rmt_debounced == HIGH) {
+					// RMT モード: スイッチが開放（G6=H）→ G6=L 待機
+					rmt_waiting = true;
+					showStatus("RMT Wait", YELLOW, "", "Connect RMT switch  [any key] Cancel");
+					printf("RMT: Waiting for G6=L.\n");
+				} else if (openRecFile()) {
 					is_recording = true;
 #ifdef USE_PCM1808
 					// 録音開始後 I2S ADC を再初期化（PLAY 時に lineIn.end() しているため）
@@ -412,24 +492,29 @@ void loop(void)
 				}
 			} else {
 				// ── カレントファイルを再生 ────────────────────────
-				uint32_t total_samples = 0;
-				{
-					File f = SD.open(current_file, FILE_READ);
-					if (f) {
-						WAVHeader hdr;
-						f.read(reinterpret_cast<uint8_t*>(&hdr), sizeof(WAVHeader));
-						total_samples = hdr.dataSize / sizeof(int16_t);
-						f.close();
+				if (current_file[0] == '\0' || !SD.exists(current_file)) {
+					showStatus("No file", YELLOW, "(none)", "[R] Rec  [F] Browse");
+					printf("No playable file.\n");
+				} else {
+					uint32_t total_samples = 0;
+					{
+						File f = SD.open(current_file, FILE_READ);
+						if (f) {
+							WAVHeader hdr;
+							f.read(reinterpret_cast<uint8_t*>(&hdr), sizeof(WAVHeader));
+							total_samples = hdr.dataSize / sizeof(int16_t);
+							f.close();
+						}
 					}
+					rec_total_samples = total_samples;
+					is_playing = true;
+					showStatus("PLAY", BLUE, current_file, "Press any key to stop");
+					resetVUMeter();
+					startPlayback(current_file);
+					drawTimeIndicator(0, total_samples / SAMPLE_RATE);
+					drawVUMeter(0.0f);
+					printf("Playing: %s\n", current_file);
 				}
-				rec_total_samples = total_samples;
-				is_playing = true;
-				showStatus("PLAY", BLUE, current_file, "Press any key to stop");
-				resetVUMeter();
-				startPlayback(current_file);
-				drawTimeIndicator(0, total_samples / SAMPLE_RATE);
-				drawVUMeter(0.0f);
-				printf("Playing: %s\n", current_file);
 			}
 		} else {
 			// ── 録音停止要求 ──────────────────────────────────────
@@ -442,6 +527,12 @@ void loop(void)
 	if (is_recording && rec_total_samples >= (MAX_RECORDING_SIZE / sizeof(int16_t))) {
 		stop_requested = true;
 		printf("Max recording size reached. Stop requested.\n");
+	}
+
+	// RMT モード: G6=H に戻ったら録音停止
+	if (is_recording && g_config.use_rmt && rmt_debounced == HIGH) {
+		stop_requested = true;
+		printf("RMT: G6 returned HIGH. Stop requested.\n");
 	}
 
 	// ── 録音後の自動再生フロー ─────────────────────────────────────
@@ -460,7 +551,7 @@ void loop(void)
 	// 再生完了 → 初期状態に戻る
 	if (is_playing && isPlaybackDone()) {
 		is_playing = false;
-		showStatus("Ready", WHITE, current_file, "[F] Browse  [R] Rec  [key] Play");
+		showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
 		printf("Playback finished. Ready.\n");
 	}
 
@@ -476,6 +567,23 @@ void loop(void)
 			const uint32_t cur_sec   = played_bytes / (SAMPLE_RATE * sizeof(int16_t));
 			const uint32_t total_sec = rec_total_samples / SAMPLE_RATE;
 			drawTimeIndicator(cur_sec, total_sec);
+		}
+	}
+
+	// RMT 待機中: G6=L に変化したら録音開始
+	if (rmt_waiting) {
+		if (rmt_debounced == LOW) {
+			rmt_waiting = false;
+			if (openRecFile()) {
+				is_recording = true;
+#ifdef USE_PCM1808
+				lineIn.begin(3, 4, 5, 13);
+#endif
+				resetVUMeter();
+				showStatus("REC", RED, "", "Press any key to stop");
+				drawVUMeter(0.0f);
+				printf("RMT: Recording started (G6=L).\n");
+			}
 		}
 	}
 
