@@ -67,6 +67,7 @@ static File     rec_file;
 static uint32_t rec_total_samples = 0;  // 録音済みサンプル数（WAVヘッダ更新用）
 static uint32_t file_counter      = 0;
 static char     filename[32];     // 録音ファイル名格納用
+static char     current_file[32]; // カレントファイル名
 
 // ── WAVヘッダ ─────────────────────────────────────────────────
 struct WAVHeader {
@@ -113,6 +114,7 @@ void sd_task(void* arg)
 		if (buf_idx == QUEUE_STOP_SIGNAL) {
 			// 録音終了シグナル受信 → WAV ヘッダ確定
 			finalizeRecFile();
+			strncpy(current_file, filename, sizeof(current_file));
 			play_requested = true;  // loop() に再生開始を通知
 		} else {
 			// SD にバッファを書き込む
@@ -288,6 +290,13 @@ void setup(void)
 	}
 	printf("SD OK - %lluMB\r\n", SD.cardSize() / (1024 * 1024));
 
+	// カレントファイル初期化（起動時は /rec0000.wav を選択。なければ空ファイルを作成）
+	strncpy(current_file, "/rec0000.wav", sizeof(current_file));
+	if (!SD.exists(current_file)) {
+		File f = SD.open(current_file, FILE_WRITE);
+		if (f) f.close();
+	}
+
 	// ADC 初期化
 #ifdef USE_PCM1808
 	// PCM1808 Line In  (EXT port: BCK=3, LRCK=4, DIN=5, MCK=13)
@@ -310,7 +319,7 @@ void setup(void)
 		0          // Core 0
 	);
 
-	showStatus("Ready", WHITE, "", "[F] Browse  [key] Record");
+	showStatus("Ready", WHITE, current_file, "[F] Browse  [key] Record");
 }
 
 // ============================================================
@@ -341,12 +350,12 @@ void loop(void)
 			M5Cardputer.Speaker.end();
 			play_file.close();
 			is_playing = false;
-			showStatus("Ready", WHITE, "", "[F] Browse  [key] Record");
+			showStatus("Ready", WHITE, current_file, "[F] Browse  [key] Record");
 			printf("Playback stopped by user.\n");
 		} else if (is_browsing) {
 			// ── ブラウザ → Ready ──────────────────────────────────
 			is_browsing = false;
-			showStatus("Ready", WHITE, "", "[F] Browse  [key] Record");
+			showStatus("Ready", WHITE, current_file, "[F] Browse  [key] Record");
 			printf("Browse closed.\n");
 		} else if (!is_recording) {
 			if (trigger_f) {
@@ -401,7 +410,7 @@ void loop(void)
 	// 再生完了 → 初期状態に戻る
 	if (is_playing && isPlaybackDone()) {
 		is_playing = false;
-		showStatus("Ready", WHITE, "", "[F] Browse  [key] Record");
+		showStatus("Ready", WHITE, current_file, "[F] Browse  [key] Record");
 		printf("Playback finished. Ready.\n");
 	}
 
