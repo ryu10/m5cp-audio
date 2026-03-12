@@ -1,4 +1,5 @@
 #include "ui.h"
+#include <SD.h>
 
 // ============================================================
 // drawChrome  ―  ヘッダー・フッターを描画する（毎回 showStatus から呼ぶ）
@@ -80,7 +81,74 @@ void showStatus(const char* label, uint16_t color,
 }
 
 // ============================================================
-// drawTimeIndicator  ―  コンテンツエリア下端に時間を描画
+// showFileBrowser  ―  SD カードルートの .wav ファイル一覧を表示
+// ============================================================
+void showFileBrowser()
+{
+	const int32_t W        = M5Cardputer.Display.width();    // 240
+	const int32_t H        = M5Cardputer.Display.height();   // 135
+	const int32_t contentY = UI_HEADER_H;                    // 20
+	const int32_t contentH = H - UI_HEADER_H - UI_FOOTER_H; // 90
+
+	M5Cardputer.Display.fillRect(0, 0, W, H, BLACK);
+	drawChrome();
+
+	// フッターにヒント
+	M5Cardputer.Display.setFont(&fonts::FreeSans9pt7b);
+	M5Cardputer.Display.setTextDatum(middle_center);
+	M5Cardputer.Display.setTextColor(WHITE);
+	M5Cardputer.Display.drawString("any key to return", W / 2, H - UI_FOOTER_H / 2);
+
+	// ファイルリスト（Font2 = sub と同じ小フォント）
+	M5Cardputer.Display.setFont(&fonts::Font2);
+	const int32_t lineH    = M5Cardputer.Display.fontHeight() + 1;
+	const int32_t maxLines = contentH / lineH;
+
+	File root = SD.open("/");
+	if (!root) {
+		M5Cardputer.Display.setTextDatum(middle_center);
+		M5Cardputer.Display.setTextColor(RED);
+		M5Cardputer.Display.drawString("SD open error", W / 2, contentY + contentH / 2);
+		return;
+	}
+
+	int lineCount = 0;
+	for (;;) {
+		File entry = root.openNextFile();
+		if (!entry) break;
+		if (entry.isDirectory()) { entry.close(); continue; }
+
+		const char* rawName     = entry.name();
+		const char* displayName = (rawName[0] == '/') ? rawName + 1 : rawName;
+
+		// 拡張子 .wav（大小文字不問）
+		const size_t len = strlen(displayName);
+		if (len > 4) {
+			const char* ext = displayName + len - 4;
+			const bool isWav = (ext[0] == '.') &&
+			                   (ext[1] == 'w' || ext[1] == 'W') &&
+			                   (ext[2] == 'a' || ext[2] == 'A') &&
+			                   (ext[3] == 'v' || ext[3] == 'V');
+			if (isWav && lineCount < maxLines) {
+				M5Cardputer.Display.setTextDatum(top_left);
+				M5Cardputer.Display.setTextColor(WHITE);
+				M5Cardputer.Display.drawString(
+					displayName, 4, contentY + lineCount * lineH);
+				lineCount++;
+			}
+		}
+		entry.close();
+	}
+	root.close();
+
+	if (lineCount == 0) {
+		M5Cardputer.Display.setFont(&fonts::Font2);
+		M5Cardputer.Display.setTextDatum(middle_center);
+		M5Cardputer.Display.setTextColor(0x7BEF);
+		M5Cardputer.Display.drawString("(no wav files)", W / 2, contentY + contentH / 2);
+	}
+}
+
 //   total_sec > 0 : "mm:ss / mm:ss" + プログレスバー（PLAY 用）
 //   total_sec == 0: "mm:ss" のみ（REC 用）
 // ============================================================

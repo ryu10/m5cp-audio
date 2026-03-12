@@ -26,6 +26,9 @@ void drawWaveform(const int16_t* buf, size_t len);
 //   total_sec : 総再生時間（秒）
 void drawTimeIndicator(uint32_t cur_sec, uint32_t total_sec);
 
+// SD カードルートの .wav ファイル一覧をコンテンツエリアに表示する
+void showFileBrowser();
+
 // ── VU メーター定数 ──────────────────────────────────────────
 // UI_VU_Y / UI_VU_H は drawVUMeter() 内でフォント高さから動的に算出する
 // ここでは左右マージンのみ定義

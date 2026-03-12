@@ -361,7 +361,7 @@ void loop(void)
 			if (trigger_f) {
 				// ── ファイルブラウザへ遷移 ────────────────────────
 				is_browsing = true;
-				showStatus("Browse", CYAN, "-- File Browser --", "Press any key to return");
+				showFileBrowser();
 				printf("File browser opened.\n");
 			} else {
 				// ── 録音開始 ──────────────────────────────────────
