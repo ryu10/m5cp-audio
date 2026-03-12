@@ -17,8 +17,10 @@ void drawChrome()
 	M5Cardputer.Display.setTextColor(WHITE);
 	M5Cardputer.Display.drawString("CP Recorder", 5, 3);
 
-	// ── RMT インジケータ（有効時のみ: 右上に角丸赤地+黄文字）────
-	int32_t badgeRight = W - 2;  // バッジ右端 X（右から積み上げ）
+	// ── ヘッダーバッジ（右から積み上げ）─────────────────────────
+	int32_t badgeRight = W - 2;  // バッジ右端 X
+
+	// テキストバッジ共通描画ヘルパー
 	auto drawBadge = [&](const char* text, uint16_t bg, uint16_t fg) {
 		M5Cardputer.Display.setFont(&fonts::Font2);
 		const int32_t textW  = M5Cardputer.Display.textWidth(text);
@@ -31,9 +33,39 @@ void drawChrome()
 		M5Cardputer.Display.setTextDatum(middle_center);
 		M5Cardputer.Display.setTextColor(fg);
 		M5Cardputer.Display.drawString(text, bx + bw / 2, by + BADGE_H / 2);
-		badgeRight = bx - 2;  // 次のバッジはさらに左
+		badgeRight = bx - 2;
 	};
-	if (g_config.use_rmt) drawBadge("rmt", RED,  YELLOW);
+
+	// バッテリーアイコン（常時・最右端）
+	{
+		static int32_t  s_batt_lvl = -1;
+		static uint32_t s_batt_ms  = 0;
+		const  uint32_t now_ms = millis();
+		if (s_batt_lvl < 0 || (now_ms - s_batt_ms) >= 60000u) {
+			s_batt_lvl = M5Cardputer.Power.getBatteryLevel();
+			s_batt_ms  = now_ms;
+		}
+		if (s_batt_lvl >= 0) {
+			static constexpr int32_t BW = 16;  // 本体幅
+			static constexpr int32_t BH = 9;   // 本体高さ
+			static constexpr int32_t TW = 2;   // 端子幅
+			static constexpr int32_t TH = 5;   // 端子高さ
+			const int32_t  bx  = badgeRight - TW - BW;
+			const int32_t  by  = (UI_HEADER_H - BH) / 2;
+			const uint16_t col = (s_batt_lvl < 20) ? (uint16_t)RED : (uint16_t)GREEN;
+			// 端子（右側の出っ張り）
+			M5Cardputer.Display.fillRect(bx + BW, by + (BH - TH) / 2, TW, TH, col);
+			// 本体外枠
+			M5Cardputer.Display.drawRect(bx, by, BW, BH, col);
+			// 充電量フィル
+			const int32_t fillW = (BW - 2) * s_batt_lvl / 100;
+			if (fillW > 0)
+				M5Cardputer.Display.fillRect(bx + 1, by + 1, fillW, BH - 2, col);
+			badgeRight = bx - 2;
+		}
+	}
+
+	if (g_config.use_rmt) drawBadge("rmt", RED, YELLOW);
 
 	// ヘッダー下境界線
 	M5Cardputer.Display.drawFastHLine(0, UI_HEADER_H - 1, W, (uint16_t)0x4208); // ダークグレー

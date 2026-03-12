@@ -473,11 +473,12 @@ void loop(void)
 				printf("Settings opened.\n");			} else if (trigger_r) {
 				// ── 新規録音開始 ──────────────────────────────────
 				if (g_config.use_rmt && rmt_debounced == HIGH) {
-					// RMT モード: スイッチが開放（G6=H）→ G6=L 待機
+					// RMT モード: G6=H（プラグまた・スイッチ OFF）→ G6=L 待機
 					rmt_waiting = true;
-					showStatus("RMT Wait", YELLOW, "", "Connect RMT switch  [any key] Cancel");
-					printf("RMT: Waiting for G6=L.\n");
+					showStatus("RMT Wait", YELLOW, "", "Waiting for switch  [any key] Cancel");
+					printf("RMT: G6=H, waiting for G6=L.\n");
 				} else if (openRecFile()) {
+					// RMT モードなら G6=L（プラグ未挑叁またはスイッチ ON）→ 即座録音開始
 					is_recording = true;
 #ifdef USE_PCM1808
 					// 録音開始後 I2S ADC を再初期化（PLAY 時に lineIn.end() しているため）
@@ -486,7 +487,7 @@ void loop(void)
 					resetVUMeter();
 					showStatus("REC", RED, "", "Press any key to stop");
 					drawVUMeter(0.0f);
-					printf("Recording started.\n");
+					printf("Recording started%s.\n", g_config.use_rmt ? " (RMT G6=L)" : "");
 				} else {
 					printf("Failed to start recording.\n");
 				}
@@ -530,6 +531,7 @@ void loop(void)
 	}
 
 	// RMT モード: G6=H に戻ったら録音停止
+	// （キー入力による停止は既存の stop_requested フローで処理済み）
 	if (is_recording && g_config.use_rmt && rmt_debounced == HIGH) {
 		stop_requested = true;
 		printf("RMT: G6 returned HIGH. Stop requested.\n");
