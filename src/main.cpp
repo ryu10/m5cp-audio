@@ -319,7 +319,7 @@ void setup(void)
 		0          // Core 0
 	);
 
-	showStatus("Ready", WHITE, current_file, "[F] Browse  [key] Record");
+	showStatus("Ready", WHITE, current_file, "[F] Browse  [R] Rec  [key] Play");
 }
 
 // ============================================================
@@ -335,13 +335,18 @@ void loop(void)
 	M5Cardputer.update();
 
 	// キー入力を解析
-	char pressedChar = 0;
+	char pressedChar  = 0;
+	bool pressedEnter = false;
 	if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
-		const auto& w = M5Cardputer.Keyboard.keysState().word;
+		const auto& ks = M5Cardputer.Keyboard.keysState();
+		const auto& w  = ks.word;
 		if (!w.empty()) pressedChar = w[0];
+		pressedEnter = ks.enter;
 	}
-	const bool trigger   = M5Cardputer.BtnA.wasClicked() || (pressedChar != 0);
+	const bool trigger   = M5Cardputer.BtnA.wasClicked() || (pressedChar != 0) || pressedEnter;
 	const bool trigger_f = (pressedChar == 'f' || pressedChar == 'F');
+	const bool trigger_r = M5Cardputer.BtnA.wasClicked() ||
+	                       (pressedChar == 'r' || pressedChar == 'R');
 
 	if (trigger) {
 		if (is_playing) {
@@ -350,21 +355,41 @@ void loop(void)
 			M5Cardputer.Speaker.end();
 			play_file.close();
 			is_playing = false;
-			showStatus("Ready", WHITE, current_file, "[F] Browse  [key] Record");
+			showStatus("Ready", WHITE, current_file, "[F] Browse  [R] Rec  [key] Play");
 			printf("Playback stopped by user.\n");
 		} else if (is_browsing) {
-			// ── ブラウザ → Ready ──────────────────────────────────
-			is_browsing = false;
-			showStatus("Ready", WHITE, current_file, "[F] Browse  [key] Record");
-			printf("Browse closed.\n");
+			if (pressedChar == ';') {
+				// ── ブラウザ: 上に移動 ─────────────────────────────
+				browseMoveUp();
+				showFileBrowser();
+			} else if (pressedChar == '.') {
+				// ── ブラウザ: 下に移動 ─────────────────────────────
+				browseMoveDown();
+				showFileBrowser();
+			} else if (pressedChar == '`') {
+				// ── ブラウザ → Ready（Esc: 選択変更なし）──────────
+				is_browsing = false;
+				showStatus("Ready", WHITE, current_file, "[F] Browse  [R] Rec  [key] Play");
+				printf("Browse cancelled.\n");
+			} else {
+				// ── ブラウザ → Ready（決定: カレントファイル更新）──
+				const char* sel = browseSelectedFile();
+				if (sel) {
+					snprintf(current_file, sizeof(current_file), "/%s", sel);
+				}
+				is_browsing = false;
+				showStatus("Ready", WHITE, current_file, "[F] Browse  [R] Rec  [key] Play");
+				printf("Browse selected: %s\n", current_file);
+			}
 		} else if (!is_recording) {
 			if (trigger_f) {
 				// ── ファイルブラウザへ遷移 ────────────────────────
 				is_browsing = true;
+				initFileBrowser(current_file);
 				showFileBrowser();
 				printf("File browser opened.\n");
-			} else {
-				// ── 録音開始 ──────────────────────────────────────
+			} else if (trigger_r) {
+				// ── 新規録音開始 ──────────────────────────────────
 				if (openRecFile()) {
 					is_recording = true;
 #ifdef USE_PCM1808
@@ -377,8 +402,27 @@ void loop(void)
 					printf("Recording started.\n");
 				} else {
 					printf("Failed to start recording.\n");
-					// ここにエラー表示を実装
 				}
+			} else {
+				// ── カレントファイルを再生 ────────────────────────
+				uint32_t total_samples = 0;
+				{
+					File f = SD.open(current_file, FILE_READ);
+					if (f) {
+						WAVHeader hdr;
+						f.read(reinterpret_cast<uint8_t*>(&hdr), sizeof(WAVHeader));
+						total_samples = hdr.dataSize / sizeof(int16_t);
+						f.close();
+					}
+				}
+				rec_total_samples = total_samples;
+				is_playing = true;
+				showStatus("PLAY", BLUE, current_file, "Press any key to stop");
+				resetVUMeter();
+				startPlayback(current_file);
+				drawTimeIndicator(0, total_samples / SAMPLE_RATE);
+				drawVUMeter(0.0f);
+				printf("Playing: %s\n", current_file);
 			}
 		} else {
 			// ── 録音停止要求 ──────────────────────────────────────
@@ -410,7 +454,7 @@ void loop(void)
 	// 再生完了 → 初期状態に戻る
 	if (is_playing && isPlaybackDone()) {
 		is_playing = false;
-		showStatus("Ready", WHITE, current_file, "[F] Browse  [key] Record");
+		showStatus("Ready", WHITE, current_file, "[F] Browse  [R] Rec  [key] Play");
 		printf("Playback finished. Ready.\n");
 	}
 

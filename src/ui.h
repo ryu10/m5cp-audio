@@ -26,8 +26,15 @@ void drawWaveform(const int16_t* buf, size_t len);
 //   total_sec : 総再生時間（秒）
 void drawTimeIndicator(uint32_t cur_sec, uint32_t total_sec);
 
-// SD カードルートの .wav ファイル一覧をコンテンツエリアに表示する
+// ファイルブラウザ: SDスキャン・初期選択位置計算
+void initFileBrowser(const char* current_file);
+// カレントディレクトリの .wav 一覧をスクロール・ハイライト付きで表示
 void showFileBrowser();
+// 選択を一つ上 / 下に移動
+void browseMoveUp();
+void browseMoveDown();
+// 現在選択中のファイル名（"/" なし）を返す。0件なら nullptr
+const char* browseSelectedFile();
 
 // ── VU メーター定数 ──────────────────────────────────────────
 // UI_VU_Y / UI_VU_H は drawVUMeter() 内でフォント高さから動的に算出する
