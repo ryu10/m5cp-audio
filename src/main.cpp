@@ -51,6 +51,9 @@ static constexpr uint8_t QUEUE_STOP_SIGNAL = 0xFF;
 static volatile bool is_recording   = false;
 static volatile bool stop_requested = false;
 
+// ── ブラウザ状態 ──────────────────────────────────────────────
+static bool is_browsing = false;
+
 // ── 再生状態 ─────────────────────────────────────────────────
 static volatile bool is_playing     = false;
 static volatile bool play_requested = false;  // sd_task → loop() への再生開始通知
@@ -307,7 +310,7 @@ void setup(void)
 		0          // Core 0
 	);
 
-	showStatus("Ready", WHITE, "", "Press any key to record");
+	showStatus("Ready", WHITE, "", "[F] Browse  [key] Record");
 }
 
 // ============================================================
@@ -322,8 +325,15 @@ void loop(void)
 {
 	M5Cardputer.update();
 
-	const bool trigger = M5Cardputer.BtnA.wasClicked() ||
-	                     (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed());
+	// キー入力を解析
+	char pressedChar = 0;
+	if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+		const auto& w = M5Cardputer.Keyboard.keysState().word;
+		if (!w.empty()) pressedChar = w[0];
+	}
+	const bool trigger   = M5Cardputer.BtnA.wasClicked() || (pressedChar != 0);
+	const bool trigger_f = (pressedChar == 'f' || pressedChar == 'F');
+
 	if (trigger) {
 		if (is_playing) {
 			// ── 再生停止 ──────────────────────────────────────────
@@ -331,23 +341,35 @@ void loop(void)
 			M5Cardputer.Speaker.end();
 			play_file.close();
 			is_playing = false;
-			showStatus("Ready", WHITE, "", "Press any key to record");
+			showStatus("Ready", WHITE, "", "[F] Browse  [key] Record");
 			printf("Playback stopped by user.\n");
+		} else if (is_browsing) {
+			// ── ブラウザ → Ready ──────────────────────────────────
+			is_browsing = false;
+			showStatus("Ready", WHITE, "", "[F] Browse  [key] Record");
+			printf("Browse closed.\n");
 		} else if (!is_recording) {
-			// ── 録音開始 ─────────────────────────────────────────
-			if (openRecFile()) {
-				is_recording = true;
-#ifdef USE_PCM1808
-				// 再生時に end() した I2S ADC を再初期化
-				lineIn.begin(3, 4, 5, 13);
-#endif
-				resetVUMeter();
-				showStatus("REC", RED, "", "Press any key to stop");
-				drawVUMeter(0.0f);
-				printf("Recording started.\n");
+			if (trigger_f) {
+				// ── ファイルブラウザへ遷移 ────────────────────────
+				is_browsing = true;
+				showStatus("Browse", CYAN, "-- File Browser --", "Press any key to return");
+				printf("File browser opened.\n");
 			} else {
-				printf("Failed to start recording.\n");
-				// ここにエラー表示を実装
+				// ── 録音開始 ──────────────────────────────────────
+				if (openRecFile()) {
+					is_recording = true;
+#ifdef USE_PCM1808
+					// 再生時に end() した I2S ADC を再初期化
+					lineIn.begin(3, 4, 5, 13);
+#endif
+					resetVUMeter();
+					showStatus("REC", RED, "", "Press any key to stop");
+					drawVUMeter(0.0f);
+					printf("Recording started.\n");
+				} else {
+					printf("Failed to start recording.\n");
+					// ここにエラー表示を実装
+				}
 			}
 		} else {
 			// ── 録音停止要求 ──────────────────────────────────────
@@ -379,7 +401,7 @@ void loop(void)
 	// 再生完了 → 初期状態に戻る
 	if (is_playing && isPlaybackDone()) {
 		is_playing = false;
-		showStatus("Ready", WHITE, "", "Press any key to record");
+		showStatus("Ready", WHITE, "", "[F] Browse  [key] Record");
 		printf("Playback finished. Ready.\n");
 	}
 
