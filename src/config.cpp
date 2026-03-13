@@ -20,6 +20,7 @@ static void setDefaults()
     g_config.current_file[0] = '\0';  // 未設定
     g_config.use_rmt        = false;
     g_config.speaker_volume = 128;
+    g_config.brightness     = 128;
 }
 
 // ── "Yes"/"True"/"1" → true、それ以外 → false ─────────────────
@@ -76,12 +77,17 @@ void loadConfig()
             if (v < 0) v = 0;
             if (v > 255) v = 255;
             g_config.speaker_volume = (uint8_t)v;
+        } else if (key == "brightness") {
+            int v = val.toInt();
+            if (v < 10)  v = 10;
+            if (v > 255) v = 255;
+            g_config.brightness = (uint8_t)v;
         }
     }
 
     f.close();
-    printf("Config loaded: file=%s use_rmt=%d speaker_volume=%d\n",
-           g_config.current_file, g_config.use_rmt, g_config.speaker_volume);
+    printf("Config loaded: file=%s use_rmt=%d speaker_volume=%d brightness=%d\n",
+           g_config.current_file, g_config.use_rmt, g_config.speaker_volume, g_config.brightness);
 }
 
 // ============================================================
@@ -105,6 +111,8 @@ void saveConfig()
     f.println(g_config.use_rmt ? "Yes" : "No");
     f.print("speaker_volume=");
     f.println(g_config.speaker_volume);
+    f.print("brightness=");
+    f.println(g_config.brightness);
 
     f.close();
     printf("Config saved.\n");

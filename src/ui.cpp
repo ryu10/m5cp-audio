@@ -463,6 +463,7 @@ static const SettingsItem SETTINGS_ITEMS[] = {
 	{ "current_file",   true  },
 	{ "use_rmt",        false },
 	{ "spkr_volume",    false },
+	{ "brightness",     false },
 };
 static constexpr int SETTINGS_COUNT = (int)(sizeof(SETTINGS_ITEMS) / sizeof(SETTINGS_ITEMS[0]));
 
@@ -483,6 +484,9 @@ static void getSettingValue(int idx, char* buf, size_t buflen)
 			break;
 		case 2:
 			snprintf(buf, buflen, "%d", s_cfg_edit.speaker_volume);
+			break;
+		case 3:
+			snprintf(buf, buflen, "%d", s_cfg_edit.brightness);
 			break;
 		default:
 			break;
@@ -507,30 +511,30 @@ void showSettingsScreen()
 	M5Cardputer.Display.fillRect(0, 0, W, H, BLACK);
 	drawChrome();
 
-	// ── フッター（ファイルブラウザ準拠）───────────────────────────
+	// ── フッター ──────────────────────────────────────────────────
 	{
 		const int32_t fy = H - UI_FOOTER_H / 2;
 		const int32_t ts = 5;
+
+		// ▲ ▼ ◀ ▶ オレンジ三角（左寄せ）
+		// ▲ up
+		M5Cardputer.Display.fillTriangle(
+			10, fy - ts,  5, fy + ts, 15, fy + ts, ORANGE);
+		// ▼ down
+		M5Cardputer.Display.fillTriangle(
+			26, fy + ts, 21, fy - ts, 31, fy - ts, ORANGE);
+		// ◀ dec
+		M5Cardputer.Display.fillTriangle(
+			38, fy,  48, fy - ts, 48, fy + ts, ORANGE);
+		// ▶ inc
+		M5Cardputer.Display.fillTriangle(
+			58, fy - ts, 58, fy + ts, 68, fy, ORANGE);
+
+		// Esc=cancel  Any=ok（右寄せ）
 		M5Cardputer.Display.setFont(&fonts::FreeSans9pt7b);
 		M5Cardputer.Display.setTextColor(WHITE);
-		M5Cardputer.Display.setTextDatum(middle_left);
-
-		// ▲ ;
-		M5Cardputer.Display.fillTriangle(
-			13, fy - ts,  8, fy + ts, 18, fy + ts, ORANGE);
-		M5Cardputer.Display.drawString(";", 22, fy);
-
-		// ▼ .
-		M5Cardputer.Display.fillTriangle(
-			44, fy + ts, 39, fy - ts, 49, fy - ts, ORANGE);
-		M5Cardputer.Display.drawString(".", 53, fy);
-
-		// ,=dec  /=inc
-		M5Cardputer.Display.drawString(",- /+", 65, fy);
-
-		// `=esc  any=ok（右寄せ）
 		M5Cardputer.Display.setTextDatum(middle_right);
-		M5Cardputer.Display.drawString("`=esc  any=ok", W - 4, fy);
+		M5Cardputer.Display.drawString("Esc=cancel  Any=ok", W - 4, fy);
 	}
 
 	// ── 設定項目リスト ──────────────────────────────────────────
@@ -576,6 +580,14 @@ void settingsChange(bool increase)
 			s_cfg_edit.speaker_volume = (uint8_t)v;
 			break;
 		}
+		case 3: {
+			int v = (int)s_cfg_edit.brightness + (increase ? 25 : -25);
+			if (v < 10)  v = 10;
+			if (v > 255) v = 255;
+			s_cfg_edit.brightness = (uint8_t)v;
+			M5Cardputer.Display.setBrightness(s_cfg_edit.brightness);  // 即時プレビュー
+			break;
+		}
 		default: break;
 	}
 }
@@ -583,11 +595,14 @@ void settingsChange(bool increase)
 bool settingsCommit()
 {
 	const bool changed = (s_cfg_edit.use_rmt        != g_config.use_rmt        ||
-	                      s_cfg_edit.speaker_volume != g_config.speaker_volume);
+	                      s_cfg_edit.speaker_volume != g_config.speaker_volume ||
+	                      s_cfg_edit.brightness     != g_config.brightness);
 	if (changed) {
 		g_config.use_rmt        = s_cfg_edit.use_rmt;
 		g_config.speaker_volume = s_cfg_edit.speaker_volume;
+		g_config.brightness     = s_cfg_edit.brightness;
 		M5Cardputer.Speaker.setVolume(g_config.speaker_volume);
+		M5Cardputer.Display.setBrightness(g_config.brightness);
 	}
 	return changed;
 }

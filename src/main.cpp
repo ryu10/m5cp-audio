@@ -27,6 +27,10 @@
 #include "ui.h"
 #define USE_PCM1808  // PCM1808 外部ADCを使う場合は有効化。無効時は内蔵マイクを使用。
 
+// ── 省電力: WiFi / BT 無効化 ──────────────────────────────────
+#include <WiFi.h>
+#include <esp_bt.h>
+
 // ── SD SPI ピン ──────────────────────────────────────────────
 #define SD_SPI_SCK_PIN  (40)
 #define SD_SPI_MISO_PIN (39)
@@ -334,6 +338,10 @@ void setup(void)
 	M5Cardputer.begin(cfg);
 	Serial.begin(115200);
 
+	// WiFi / BT を無効化して消費電力を削減する（このアプリは無線不使用）
+	WiFi.mode(WIFI_OFF);
+	esp_bt_controller_disable();
+
 	M5Cardputer.Display.startWrite();
 	M5Cardputer.Display.setRotation(1);
 	M5Cardputer.Display.setTextDatum(top_center);
@@ -350,6 +358,7 @@ void setup(void)
 
 	// 設定ファイル読み込み（なければデフォルト値で新規作成）
 	loadConfig();
+	M5Cardputer.Display.setBrightness(g_config.brightness);
 
 	// カレントファイル初期化（設定ファイルの値を使用）
 	strncpy(current_file, g_config.current_file, sizeof(current_file));
@@ -379,7 +388,7 @@ void setup(void)
 		0          // Core 0
 	);
 
-	showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
+	showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
 }
 
 // ============================================================
@@ -443,7 +452,7 @@ void loop(void)
 			M5Cardputer.Speaker.end();
 			play_file.close();
 			is_playing = false;
-			showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
+			showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
 			printf("Playback stopped by user.\n");
 		} else if (is_browsing) {
 			if (pressedChar == ';') {
@@ -457,7 +466,7 @@ void loop(void)
 			} else if (pressedChar == '`') {
 				// ── ブラウザ → Ready（Esc: 選択変更なし）──────────
 				is_browsing = false;
-				showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
+				showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
 				printf("Browse cancelled.\n");
 			} else {
 				// ── ブラウザ → Ready（決定: カレントファイル更新）──
@@ -469,13 +478,13 @@ void loop(void)
 					saveConfig();
 				}
 				is_browsing = false;
-				showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
+				showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
 				printf("Browse selected: %s\n", current_file);
 			}
 		} else if (rmt_waiting) {
 			// ── RMT 待機キャンセル ─────────────────────────────────
 			rmt_waiting = false;
-			showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
+			showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
 			printf("RMT wait cancelled.\n");
 		} else if (is_settings) {
 			// ── 設定画面: キー入力処理 ──────────────────────────────
@@ -494,13 +503,14 @@ void loop(void)
 			} else if (pressedChar == '`') {
 				// ── 設定キャンセル（変更破棄）─────────────────────────
 				is_settings = false;
-				showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
+				M5Cardputer.Display.setBrightness(g_config.brightness);  // プレビューを元に戻す
+				showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
 				printf("Settings cancelled.\n");
 			} else {
 				// ── 設定保存して閉じる ──────────────────────────────
 				if (settingsCommit()) saveConfig();
 				is_settings = false;
-				showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
+				showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
 				printf("Settings saved.\n");
 			}
 		} else if (!is_recording) {
@@ -597,7 +607,7 @@ void loop(void)
 	// 再生完了 → 初期状態に戻る
 	if (is_playing && isPlaybackDone()) {
 		is_playing = false;
-		showStatus("Ready", WHITE, current_file, "[F]Browse [R]Rec [S]Set [key]Play");
+		showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
 		printf("Playback finished. Ready.\n");
 	}
 
