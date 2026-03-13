@@ -460,9 +460,10 @@ struct SettingsItem {
 	bool        readonly;
 };
 static const SettingsItem SETTINGS_ITEMS[] = {
-	{ "current_file",  true  },
-	{ "skip_silence",  false },
-	{ "use_rmt",       false },
+	{ "current_file",   true  },
+	{ "skip_silence",   false },
+	{ "use_rmt",        false },
+	{ "spkr_volume",    false },
 };
 static constexpr int SETTINGS_COUNT = (int)(sizeof(SETTINGS_ITEMS) / sizeof(SETTINGS_ITEMS[0]));
 
@@ -484,6 +485,9 @@ static void getSettingValue(int idx, char* buf, size_t buflen)
 		case 2:
 			strncpy(buf, s_cfg_edit.use_rmt ? "Yes" : "No", buflen - 1);
 			break;
+		case 3:
+			snprintf(buf, buflen, "%d", s_cfg_edit.speaker_volume);
+			break;
 		default:
 			break;
 	}
@@ -492,6 +496,7 @@ static void getSettingValue(int idx, char* buf, size_t buflen)
 void initSettingsScreen()
 {
 	s_cfg_edit = g_config;
+	s_cfg_edit.speaker_volume = M5Cardputer.Speaker.getVolume();
 	s_cfg_sel  = 0;
 }
 
@@ -525,8 +530,8 @@ void showSettingsScreen()
 			44, fy + ts, 39, fy - ts, 49, fy - ts, ORANGE);
 		M5Cardputer.Display.drawString(".", 53, fy);
 
-		// ,/=val トグル
-		M5Cardputer.Display.drawString(",/=chg", 65, fy);
+		// ,=dec  /=inc
+		M5Cardputer.Display.drawString(",- /+", 65, fy);
 
 		// `=esc  any=ok（右寄せ）
 		M5Cardputer.Display.setTextDatum(middle_right);
@@ -564,23 +569,33 @@ void showSettingsScreen()
 void settingsMoveUp()   { if (s_cfg_sel > 0)                  s_cfg_sel--; }
 void settingsMoveDown() { if (s_cfg_sel < SETTINGS_COUNT - 1) s_cfg_sel++; }
 
-void settingsToggle()
+void settingsChange(bool increase)
 {
 	if (SETTINGS_ITEMS[s_cfg_sel].readonly) return;
 	switch (s_cfg_sel) {
 		case 1: s_cfg_edit.skip_silence = !s_cfg_edit.skip_silence; break;
 		case 2: s_cfg_edit.use_rmt      = !s_cfg_edit.use_rmt;      break;
+		case 3: {
+			int v = (int)s_cfg_edit.speaker_volume + (increase ? 10 : -10);
+			if (v < 0)   v = 0;
+			if (v > 255) v = 255;
+			s_cfg_edit.speaker_volume = (uint8_t)v;
+			break;
+		}
 		default: break;
 	}
 }
 
 bool settingsCommit()
 {
-	const bool changed = (s_cfg_edit.skip_silence != g_config.skip_silence ||
-	                      s_cfg_edit.use_rmt      != g_config.use_rmt);
+	const bool changed = (s_cfg_edit.skip_silence    != g_config.skip_silence    ||
+	                      s_cfg_edit.use_rmt         != g_config.use_rmt         ||
+	                      s_cfg_edit.speaker_volume  != g_config.speaker_volume);
 	if (changed) {
-		g_config.skip_silence = s_cfg_edit.skip_silence;
-		g_config.use_rmt      = s_cfg_edit.use_rmt;
+		g_config.skip_silence   = s_cfg_edit.skip_silence;
+		g_config.use_rmt        = s_cfg_edit.use_rmt;
+		g_config.speaker_volume = s_cfg_edit.speaker_volume;
+		M5Cardputer.Speaker.setVolume(g_config.speaker_volume);
 	}
 	return changed;
 }

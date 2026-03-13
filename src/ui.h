@@ -61,7 +61,9 @@ void showSettingsScreen();
 // フォーカスを上 / 下に移動する
 void settingsMoveUp();
 void settingsMoveDown();
-// 選択中の項目の値を反転する（readonly 項目は無視）
-void settingsToggle();
+// 選択中の項目の値を変更する（readonly 項目は無視）
+//   increase=true : 値を増やす（bool は toggle）
+//   increase=false: 値を減らす（bool は toggle）
+void settingsChange(bool increase);
 // 編集内容を g_config に書き戻す（true = 変更あり）
 bool settingsCommit();

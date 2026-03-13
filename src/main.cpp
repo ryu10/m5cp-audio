@@ -225,7 +225,7 @@ void startPlayback(const char* fname)
 	play_file.seek(sizeof(WAVHeader));
 
 	M5Cardputer.Speaker.begin();
-	M5Cardputer.Speaker.setVolume(200);
+	M5Cardputer.Speaker.setVolume(g_config.speaker_volume);
 
 	// 最初のチャンクを読み込んで再生開始
 	size_t n = play_file.read(reinterpret_cast<uint8_t*>(play_buf), sizeof(play_buf));
@@ -444,8 +444,11 @@ void loop(void)
 			} else if (pressedChar == '.') {
 				settingsMoveDown();
 				showSettingsScreen();
-			} else if (pressedChar == ',' || pressedChar == '/') {
-				settingsToggle();
+			} else if (pressedChar == ',') {
+				settingsChange(false);
+				showSettingsScreen();
+			} else if (pressedChar == '/') {
+				settingsChange(true);
 				showSettingsScreen();
 			} else if (pressedChar == '`') {
 				// ── 設定キャンセル（変更破棄）─────────────────────────

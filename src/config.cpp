@@ -19,8 +19,9 @@ AppConfig g_config;
 static void setDefaults()
 {
     g_config.current_file[0] = '\0';  // 未設定
-    g_config.skip_silence = false;
-    g_config.use_rmt      = false;
+    g_config.skip_silence  = false;
+    g_config.use_rmt       = false;
+    g_config.speaker_volume = 128;
 }
 
 // ── "Yes"/"True"/"1" → true、それ以外 → false ─────────────────
@@ -74,12 +75,17 @@ void loadConfig()
             g_config.skip_silence = parseBool(val);
         } else if (key == "use_rmt") {
             g_config.use_rmt = parseBool(val);
+        } else if (key == "speaker_volume") {
+            int v = val.toInt();
+            if (v < 0) v = 0;
+            if (v > 255) v = 255;
+            g_config.speaker_volume = (uint8_t)v;
         }
     }
 
     f.close();
-    printf("Config loaded: file=%s skip_silence=%d use_rmt=%d\n",
-           g_config.current_file, g_config.skip_silence, g_config.use_rmt);
+    printf("Config loaded: file=%s skip_silence=%d use_rmt=%d speaker_volume=%d\n",
+           g_config.current_file, g_config.skip_silence, g_config.use_rmt, g_config.speaker_volume);
 }
 
 // ============================================================
@@ -103,6 +109,8 @@ void saveConfig()
     f.println(g_config.skip_silence ? "Yes" : "No");
     f.print("use_rmt=");
     f.println(g_config.use_rmt ? "Yes" : "No");
+    f.print("speaker_volume=");
+    f.println(g_config.speaker_volume);
 
     f.close();
     printf("Config saved.\n");
