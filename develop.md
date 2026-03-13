@@ -86,8 +86,7 @@ UI 定数: `UI_HEADER_H=20` / `UI_FOOTER_H=25` / `UI_VU_XL=4`
 | キー | 型 | デフォルト | 説明 |
 |---|---|---|---|
 | `current_file` | string | (空) | 最後に録音/選択した WAV ファイルパス |
-| `skip_silence` | bool | No | 冒頭無音スキップ (未実装) |
-| `use_rmt` | bool | No | RMT スイッチ使用 |
+| `use_rmt` | bool | No | RMT スイッチ使用（有効時は再生冒頭の無音を自動スキップ） |
 
 設定画面: Ready で `S` キー → `;`/`.` で移動、`,`/`/` で Yes/No 切り替え、Enter/他キーで保存、`` ` `` でキャンセル。`current_file` は参照専用。
 

@@ -4,7 +4,6 @@
 // フォーマット例:
 //   [app]
 //   current_file=/rec0001.wav
-//   skip_silence=No
 //   use_rmt=No
 
 #include "config.h"
@@ -19,8 +18,7 @@ AppConfig g_config;
 static void setDefaults()
 {
     g_config.current_file[0] = '\0';  // 未設定
-    g_config.skip_silence  = false;
-    g_config.use_rmt       = false;
+    g_config.use_rmt        = false;
     g_config.speaker_volume = 128;
 }
 
@@ -71,8 +69,6 @@ void loadConfig()
         if (key == "current_file") {
             strncpy(g_config.current_file, val.c_str(), sizeof(g_config.current_file) - 1);
             g_config.current_file[sizeof(g_config.current_file) - 1] = '\0';
-        } else if (key == "skip_silence") {
-            g_config.skip_silence = parseBool(val);
         } else if (key == "use_rmt") {
             g_config.use_rmt = parseBool(val);
         } else if (key == "speaker_volume") {
@@ -84,8 +80,8 @@ void loadConfig()
     }
 
     f.close();
-    printf("Config loaded: file=%s skip_silence=%d use_rmt=%d speaker_volume=%d\n",
-           g_config.current_file, g_config.skip_silence, g_config.use_rmt, g_config.speaker_volume);
+    printf("Config loaded: file=%s use_rmt=%d speaker_volume=%d\n",
+           g_config.current_file, g_config.use_rmt, g_config.speaker_volume);
 }
 
 // ============================================================
@@ -105,8 +101,6 @@ void saveConfig()
     f.println("[app]");
     f.print("current_file=");
     f.println(g_config.current_file);
-    f.print("skip_silence=");
-    f.println(g_config.skip_silence ? "Yes" : "No");
     f.print("use_rmt=");
     f.println(g_config.use_rmt ? "Yes" : "No");
     f.print("speaker_volume=");

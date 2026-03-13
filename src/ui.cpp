@@ -461,7 +461,6 @@ struct SettingsItem {
 };
 static const SettingsItem SETTINGS_ITEMS[] = {
 	{ "current_file",   true  },
-	{ "skip_silence",   false },
 	{ "use_rmt",        false },
 	{ "spkr_volume",    false },
 };
@@ -480,12 +479,9 @@ static void getSettingValue(int idx, char* buf, size_t buflen)
 			buf[buflen - 1] = '\0';
 			break;
 		case 1:
-			strncpy(buf, s_cfg_edit.skip_silence ? "Yes" : "No", buflen - 1);
-			break;
-		case 2:
 			strncpy(buf, s_cfg_edit.use_rmt ? "Yes" : "No", buflen - 1);
 			break;
-		case 3:
+		case 2:
 			snprintf(buf, buflen, "%d", s_cfg_edit.speaker_volume);
 			break;
 		default:
@@ -496,7 +492,6 @@ static void getSettingValue(int idx, char* buf, size_t buflen)
 void initSettingsScreen()
 {
 	s_cfg_edit = g_config;
-	s_cfg_edit.speaker_volume = M5Cardputer.Speaker.getVolume();
 	s_cfg_sel  = 0;
 }
 
@@ -573,9 +568,8 @@ void settingsChange(bool increase)
 {
 	if (SETTINGS_ITEMS[s_cfg_sel].readonly) return;
 	switch (s_cfg_sel) {
-		case 1: s_cfg_edit.skip_silence = !s_cfg_edit.skip_silence; break;
-		case 2: s_cfg_edit.use_rmt      = !s_cfg_edit.use_rmt;      break;
-		case 3: {
+		case 1: s_cfg_edit.use_rmt = !s_cfg_edit.use_rmt; break;
+		case 2: {
 			int v = (int)s_cfg_edit.speaker_volume + (increase ? 10 : -10);
 			if (v < 0)   v = 0;
 			if (v > 255) v = 255;
@@ -588,11 +582,9 @@ void settingsChange(bool increase)
 
 bool settingsCommit()
 {
-	const bool changed = (s_cfg_edit.skip_silence    != g_config.skip_silence    ||
-	                      s_cfg_edit.use_rmt         != g_config.use_rmt         ||
-	                      s_cfg_edit.speaker_volume  != g_config.speaker_volume);
+	const bool changed = (s_cfg_edit.use_rmt        != g_config.use_rmt        ||
+	                      s_cfg_edit.speaker_volume != g_config.speaker_volume);
 	if (changed) {
-		g_config.skip_silence   = s_cfg_edit.skip_silence;
 		g_config.use_rmt        = s_cfg_edit.use_rmt;
 		g_config.speaker_volume = s_cfg_edit.speaker_volume;
 		M5Cardputer.Speaker.setVolume(g_config.speaker_volume);
