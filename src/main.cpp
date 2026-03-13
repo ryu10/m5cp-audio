@@ -205,6 +205,42 @@ void finalizeRecFile()
 }
 
 // ============================================================
+// skipInitialSilence  ―  RMT モード用: WAV ファイルの冒頭無音をスキップ
+//   f の現在位置（WAV ヘッダ直後）からスキャンし、最初の有音チャンク先頭に
+//   シークする。SAMPLE_RATE * MAX_SCAN_SEC 以内に信号が見つからない場合は
+//   元の位置（WAV ヘッダ直後）に戻す。
+//   play_buf をスキャン用バッファとして流用する（再生開始前なので競合なし）。
+// ============================================================
+static void skipInitialSilence(File& f)
+{
+	static constexpr int16_t  THR           = 500;                // ~1.5% フルスケール
+	static constexpr uint32_t MAX_SCAN_SAMP = SAMPLE_RATE * 30u; // 最大 30 秒スキャン
+
+	const uint32_t data_start = f.position();
+	uint32_t       scanned    = 0;
+
+	while (scanned < MAX_SCAN_SAMP && f.available()) {
+		const uint32_t chunk_start = f.position();
+		const size_t   n = f.read(reinterpret_cast<uint8_t*>(play_buf), sizeof(play_buf));
+		if (n == 0) break;
+		const size_t ns = n / sizeof(int16_t);
+		for (size_t i = 0; i < ns; i++) {
+			if (abs(play_buf[i]) > THR) {
+				// 有音サンプル検出 → このチャンク先頭からリーダートーンを逃さず再生
+				f.seek(chunk_start);
+				printf("skipInitialSilence: skipped %.2f sec\n",
+				       (float)scanned / SAMPLE_RATE);
+				return;
+			}
+		}
+		scanned += ns;
+	}
+	// スキャン上限内に信号が見つからなかった → 先頭に戻して通常再生
+	f.seek(data_start);
+	printf("skipInitialSilence: no signal found, playing from start.\n");
+}
+
+// ============================================================
 // startPlayback  ―  WAV ファイルをスピーカーで再生開始する
 // ============================================================
 void startPlayback(const char* fname)
@@ -223,6 +259,11 @@ void startPlayback(const char* fname)
 
 	// WAV データ部先頭（ヘッダ 44 bytes = sizeof(WAVHeader)）へシーク
 	play_file.seek(sizeof(WAVHeader));
+
+	// RMT モード時: カセットのテープ走行やリーダー部分に相当する冒頭無音をスキップ
+	if (g_config.use_rmt) {
+		skipInitialSilence(play_file);
+	}
 
 	M5Cardputer.Speaker.begin();
 	M5Cardputer.Speaker.setVolume(g_config.speaker_volume);
