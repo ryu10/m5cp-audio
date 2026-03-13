@@ -67,7 +67,8 @@ static volatile bool stop_requested = false;
 static bool is_browsing = false;
 
 // ── RMT 待機状態 ──────────────────────────────────────────────
-static bool rmt_waiting = false;  // RMT モードで G6=L 待ち中
+static bool rmt_waiting      = false;  // RMT モードで G6=L 待ち中（録音）
+static bool rmt_play_waiting = false;  // RMT モードで G6=L 待ち中（再生）
 
 // ── 設定画面状態 ─────────────────────────────────────────────
 static bool is_settings = false;  // 設定画面表示中
@@ -224,6 +225,16 @@ static void skipInitialSilence(File& f)
 	uint32_t       scanned    = 0;
 
 	while (scanned < MAX_SCAN_SAMP && f.available()) {
+		// RMT デバウンス更新（ブロッキング中もスイッチ監視を継続）
+		const int raw = digitalRead(RMT_SWITCH_PIN);
+		if (raw != rmt_raw_prev) {
+			rmt_raw_prev = raw;
+			rmt_edge_ms  = millis();
+		}
+		if ((millis() - rmt_edge_ms) >= RMT_DEBOUNCE_MS) {
+			rmt_debounced = raw;
+		}
+
 		const uint32_t chunk_start = f.position();
 		const size_t   n = f.read(reinterpret_cast<uint8_t*>(play_buf), sizeof(play_buf));
 		if (n == 0) break;
@@ -482,10 +493,15 @@ void loop(void)
 				printf("Browse selected: %s\n", current_file);
 			}
 		} else if (rmt_waiting) {
-			// ── RMT 待機キャンセル ─────────────────────────────────
+			// ── RMT 録音待機キャンセル ────────────────────────────
 			rmt_waiting = false;
 			showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
 			printf("RMT wait cancelled.\n");
+		} else if (rmt_play_waiting) {
+			// ── RMT 再生待機キャンセル ────────────────────────────
+			rmt_play_waiting = false;
+			showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
+			printf("RMT play wait cancelled.\n");
 		} else if (is_settings) {
 			// ── 設定画面: キー入力処理 ──────────────────────────────
 			if (pressedChar == ';') {
@@ -526,13 +542,14 @@ void loop(void)
 				showSettingsScreen();
 				printf("Settings opened.\n");			} else if (trigger_r) {
 				// ── 新規録音開始 ──────────────────────────────────
-				if (g_config.use_rmt && rmt_debounced == HIGH) {
-					// RMT モード: G6=H（プラグまた・スイッチ OFF）→ G6=L 待機
+				if (g_config.use_rmt) {
+					// RMT モード: 常に待機状態へ遷移（G6 がすでに LOW なら
+					// ループ末のチェックで即座に録音開始される）
 					rmt_waiting = true;
 					showStatus("RMT Wait", YELLOW, "", "Waiting for switch  [any key] Cancel");
-					printf("RMT: G6=H, waiting for G6=L.\n");
+					printf("RMT rec wait entered.\n");
 				} else if (openRecFile()) {
-					// RMT モードなら G6=L（プラグ未挑叁またはスイッチ ON）→ 即座録音開始
+					// 非 RMT モード: 即座録音開始
 					is_recording = true;
 #ifdef USE_PCM1808
 					// 録音開始後 I2S ADC を再初期化（PLAY 時に lineIn.end() しているため）
@@ -541,7 +558,7 @@ void loop(void)
 					resetVUMeter();
 					showStatus("REC", RED, "", "Press any key to stop");
 					drawVUMeter(0.0f);
-					printf("Recording started%s.\n", g_config.use_rmt ? " (RMT G6=L)" : "");
+					printf("Recording started.\n");
 				} else {
 					printf("Failed to start recording.\n");
 				}
@@ -550,6 +567,12 @@ void loop(void)
 				if (current_file[0] == '\0' || !SD.exists(current_file)) {
 					showStatus("No file", YELLOW, "(none)", "[R] Rec  [F] Browse");
 					printf("No playable file.\n");
+				} else if (g_config.use_rmt) {
+					// RMT モード: G6=L 待機（すでに LOW ならループ末で即座開始）
+					rmt_play_waiting = true;
+					showStatus("RMT Wait", YELLOW, current_file, "Waiting for switch  [any key] Cancel");
+					printf("RMT play wait entered: G6_raw=%d debounced=%d\n",
+					       digitalRead(RMT_SWITCH_PIN), rmt_debounced);
 				} else {
 					uint32_t total_samples = 0;
 					{
@@ -611,6 +634,16 @@ void loop(void)
 		printf("Playback finished. Ready.\n");
 	}
 
+	// RMT モード: 再生中に G6=H に戻ったら再生停止
+	if (is_playing && g_config.use_rmt && rmt_debounced == HIGH) {
+		M5Cardputer.Speaker.stop();
+		M5Cardputer.Speaker.end();
+		play_file.close();
+		is_playing = false;
+		showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
+		printf("RMT: G6=H, playback stopped.\n");
+	}
+
 	// 再生中タイムインジケーター・棒グラフを 1 秒ごとに更新
 	if (is_playing) {
 		static uint32_t last_ui_ms = 0;
@@ -626,7 +659,7 @@ void loop(void)
 		}
 	}
 
-	// RMT 待機中: G6=L に変化したら録音開始
+	// RMT 録音待機中: G6=L に変化したら録音開始
 	if (rmt_waiting) {
 		if (rmt_debounced == LOW) {
 			rmt_waiting = false;
@@ -640,6 +673,31 @@ void loop(void)
 				drawVUMeter(0.0f);
 				printf("RMT: Recording started (G6=L).\n");
 			}
+		}
+	}
+
+	// RMT 再生待機中: G6=L に変化したら再生開始
+	if (rmt_play_waiting) {
+		if (rmt_debounced == LOW) {
+			rmt_play_waiting = false;
+			uint32_t total_samples = 0;
+			{
+				File f = SD.open(current_file, FILE_READ);
+				if (f) {
+					WAVHeader hdr;
+					f.read(reinterpret_cast<uint8_t*>(&hdr), sizeof(WAVHeader));
+					total_samples = hdr.dataSize / sizeof(int16_t);
+					f.close();
+				}
+			}
+			rec_total_samples = total_samples;
+			is_playing = true;
+			showStatus("PLAY", BLUE, current_file, "Press any key to stop");
+			resetVUMeter();
+			startPlayback(current_file);
+			drawTimeIndicator(0, total_samples / SAMPLE_RATE);
+			drawVUMeter(0.0f);
+			printf("RMT: Playback started (G6=L): %s\n", current_file);
 		}
 	}
 
