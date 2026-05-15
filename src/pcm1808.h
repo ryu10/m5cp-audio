@@ -6,7 +6,7 @@
 class PCM1808 {
 public:
     bool begin(int bck_pin, int lrck_pin, int din_pin, int mck_pin,
-               uint32_t sample_rate = 16000);
+               uint32_t sample_rate = 44100);
     void end();
     bool isEnabled() const { return _enabled; }
     size_t read(int16_t* buf, size_t samples);
