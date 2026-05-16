@@ -576,6 +576,8 @@ void loop(void)
 			case 'P':
 			case 'R':
 			case 'S':
+			case 'I':
+			case 'Z':
 			case 'C':
 			case 'M':
 			case 'N':
@@ -597,13 +599,15 @@ void loop(void)
 	                       (pressedChar == 'r' || pressedChar == 'R');
 	const bool trigger_s = (pressedChar == 's' || pressedChar == 'S');
 	const bool serial_list = (serialCommand == 'L');
+	const bool serial_is_playing = (serialCommand == 'I');
+	const bool serial_reset = (serialCommand == 'Z');
 	const bool serial_play   = (serialCommand == 'P');
 	const bool serial_record = (serialCommand == 'R');
 	const bool serial_settings = (serialCommand == 'S');
 	const bool serial_cancel = (serialCommand == 'C');
 	const bool serial_rmt_on = (serialCommand == 'M');
 	const bool serial_rmt_off = (serialCommand == 'N');
-	const bool serial_ready_command = serial_play || serial_record || serial_settings || serial_list || serialSetFile ||
+	const bool serial_ready_command = serial_play || serial_record || serial_settings || serial_list || serial_is_playing || serial_reset || serialSetFile ||
 	                                  serial_rmt_on || serial_rmt_off;
 
 	if (!app_ready) {
@@ -627,6 +631,16 @@ void loop(void)
 
 	if (serial_settings) {
 		printSettingsToSerial();
+	}
+
+	if (serial_is_playing) {
+		Serial.println(is_playing ? "Y" : "N");
+	}
+
+	if (serial_reset) {
+		Serial.println("RESET");
+		Serial.flush();
+		ESP.restart();
 	}
 
 	if (trigger || serial_ready_command || serial_cancel) {
