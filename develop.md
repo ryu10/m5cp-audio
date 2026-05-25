@@ -77,7 +77,7 @@ UI 定数: `UI_HEADER_H=20` / `UI_FOOTER_H=25` / `UI_VU_XL=4`
 
 ## 録音フォーマット
 
-16kHz / 16bit mono / `/rec0000.wav`〜`/rec0999.wav` / 最大1時間 / WAVヘッダは終了時上書き
+44.1kHz / 16bit mono / `/rec0000.wav`〜`/rec0999.wav` / 最大1時間 / WAVヘッダは終了時上書き
 
 ---
 
