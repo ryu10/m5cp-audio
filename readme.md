@@ -4,60 +4,91 @@ JA
 
 M5Cardputer オーディオキャプチャ。内蔵マイクおよび Cardputer-ADV EXT 端子に接続した PCM1808 に対応します。レトロパソコンのカセットテープインターフェイスに接続して使用するケースを想定しています。
 
-Release 0.1.0 M5buner share: X2S7RMCggJOnHdi8
+Release 0.1.0 M5Burner share: X2S7RMCggJOnHdi8
 
-## 基本機能
+## これは何？
 
 - 44.1kHz / モノ / 16bit リニア PCM
 - SD カードに WAV 形式で保存
-- 入力：PCM1808 ライン入力または内蔵マイク（`#define USE_PCM1808` でコンパイル時切替え）
+- 入力：PCM1808 ライン入力または内蔵マイク
 - 出力：M5Cardputer-adv ライン出力または内蔵スピーカー（HW切り替え式）
 - 録音中の VU メーター表示（FL 管風 24 セグメント）
 - SD カードファイルブラウザ
 - RMT 端子対応（リレースイッチで録音開始/停止）
 - 設定画面（S キー）で各パラメータを変更・保存
 
-（以下は To Do）
+## 準備するもの
 
-- ファイル別に再生時出力レベル設定を保存可能
+- M5Cardputer 本体
+- SD カード（WAV 保存用）
+- PCM1808 を使う場合: Cardputer-ADV EXT へ接続した PCM1808 モジュール
+- RMT スイッチ運用をする場合: リレースイッチ（常開）
 
-## EXT 端子接続
+## 配線
 
-PCM1808
+### PCM1808（EXT 端子）
 
 - BCK=G3
 - LRCK=G4
-- DIN=G5 
+- DIN=G5
 - MCK=G13
 
-RMT 端子
+### RMT 端子
+
 - G6 Tip — リレースイッチ（常開）の片端
 - GND Ring — リレースイッチのもう片端
 - GPIO6 は INPUT_PULLUP（通常 H、スイッチ ON で L）
-- デバウンス: 80 ms（金属バネ式リレー対応）
+- デバウンス: 80ms（金属バネ式リレー対応）
 
-注：ジャック配線によりプラグ未接続時は Tip-Ring 短絡となっているため、「Rec 開始時最初から L だった場合はすぐに録音開始」を実装
+注: ジャック配線により、プラグ未接続時は Tip-Ring が短絡する場合があります。本ファームは、録音開始時に最初から L のときも扱えるように実装されています。
 
-## PCM1808 パラメータ
+## 使い方（本体キー）
 
-- LRCK (fs) = 44.1kHz
-- MCLK = 384fs = 16.9344MHz (`I2S_MCLK_MULTIPLE_384`)
-- I2S 受信フォーマット = 32bit スロット（`I2S_BITS_PER_SAMPLE_32BIT`）
-- WAV 保存フォーマット = モノラル 16bit PCM（アプリ側で `int16_t` へ変換）
+### Ready 画面
 
-```cpp
-    i2s_config_t cfg = {
-        .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-        .sample_rate          = sample_rate,
-        .bits_per_sample      = I2S_BITS_PER_SAMPLE_32BIT,
-        .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count        = 4,
-        .dma_buf_len          = 256,
-        .use_apll             = false,
-        .tx_desc_auto_clear   = false,
-        .fixed_mclk           = 0,
-        .mclk_multiple        = I2S_MCLK_MULTIPLE_384, 
-    };
-```
+- R キー / BtnA: 録音開始
+- F キー: ファイルブラウザ
+- S キー: 設定画面
+- その他のキー: 現在ファイルを再生
+
+### Browse 画面
+
+- ; / . : 選択移動（上/下）
+- ` : キャンセルして戻る
+- Enter またはその他キー: 選択を確定して戻る
+
+### Settings 画面
+
+- ; / . : 項目移動（上/下）
+- , / / : 値変更（減/増）
+- ` : キャンセル（変更破棄）
+- Enter またはその他キー: 保存して戻る
+
+### REC / PLAY 中
+
+- 任意キーで停止
+
+## 設定項目
+
+- use_rmt: RMT スイッチを使うか
+- spkr_volume: スピーカー音量（0-255）
+- brightness: 画面輝度（10-255）
+
+## シリアルコマンド（任意）
+
+PC からの制御が必要な場合、シリアルで次を使用できます。
+
+- P: 再生
+- R: 録音
+- C: 停止
+- S: 設定表示
+- L: WAV ファイル一覧表示
+- I: 再生中かを Y/N で返す
+- M / N: RMT 使用を ON/OFF して保存
+- F <fname.wav>: カレントファイル設定
+- Z: リセット
+
+## メモ
+
+- まずは Ready 画面で R キーを押して、録音と保存を確認するのが最短です。
+- 録音ファイルは SD カードのルートに保存されます。
