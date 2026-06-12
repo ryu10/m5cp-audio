@@ -7,7 +7,7 @@
 //                     録音終了シグナル受信 → WAV ヘッダ確定 → 再生通知
 // ※ setup()/loop() は ESP32 Arduino のデフォルトで Core 1 (loopTask) で動作する
 //
-// 最大録音サイズ: 16000サンプル/秒 × 2バイト × 3600秒 ≒ 115MB
+// 最大録音サイズ: 44100サンプル/秒 × 2バイト × 3600秒 ≒ 317MB
 // RAM使用量を抑えるため、SDへの書き込みは録音中にリアルタイムで行う。
 // WAVヘッダは録音開始時にダミー値で書き込み、終了時に実際のサイズで上書きする。
 //
@@ -17,6 +17,7 @@
 #include <M5Cardputer.h>
 #include <SD.h>
 #include <SPI.h>
+#include <ctype.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -42,8 +43,8 @@
 #define RMT_DEBOUNCE_MS    (80u)  // リレーバウンス対策デバウンス時間（ms）
 
 // ── 録音パラメータ ────────────────────────────────────────────
-static constexpr uint32_t SAMPLE_RATE    = 16000;
-static constexpr size_t   CHUNK_SAMPLES  = 512;   // 1チャンクのサンプル数（約32ms @16kHz）
+static constexpr uint32_t SAMPLE_RATE    = 44100;
+static constexpr size_t   CHUNK_SAMPLES  = 512;   // 1チャンクのサンプル数（約11.6ms @44.1kHz）
 static constexpr size_t   NUM_BUFFERS    = 2;     // ピンポンバッファ数
 
 #define MAX_RECORDING_SIZE (SAMPLE_RATE * sizeof(int16_t) * 3600)  // 最大録音サイズ（1時間分）
@@ -92,6 +93,10 @@ static uint32_t rec_total_samples = 0;  // 録音済みサンプル数（WAVヘ�
 static uint32_t file_counter      = 0;
 static char     filename[32];     // 録音ファイル名格納用
 static char     current_file[32]; // カレントファイル名
+static bool     app_ready = false;
+static char     serial_file_arg[32];
+static size_t   serial_file_arg_len = 0;
+static bool     serial_file_pending = false;
 
 // ── WAVヘッダ ─────────────────────────────────────────────────
 struct WAVHeader {
@@ -121,6 +126,132 @@ bool openRecFile();
 void finalizeRecFile();
 void startPlayback(const char* fname);
 bool isPlaybackDone();
+bool initAppAfterSdReady();
+
+static bool hasWavExtension(const char* name)
+{
+	const char* ext = strrchr(name, '.');
+	if (!ext) return false;
+	return toupper((unsigned char)ext[1]) == 'W' &&
+	       toupper((unsigned char)ext[2]) == 'A' &&
+	       toupper((unsigned char)ext[3]) == 'V' &&
+	       ext[4] == '\0';
+}
+
+static void listRootWavFilesToSerial()
+{
+	File dir = SD.open("/");
+	if (!dir || !dir.isDirectory()) {
+		Serial.println("FAIL");
+		return;
+	}
+
+	Serial.println("WAV");
+	while (true) {
+		File entry = dir.openNextFile();
+		if (!entry) break;
+		if (!entry.isDirectory() && hasWavExtension(entry.name())) {
+			const char* name = entry.name();
+			Serial.println((name[0] == '/') ? (name + 1) : name);
+		}
+		entry.close();
+	}
+	dir.close();
+	Serial.println(".");
+}
+
+static void printSettingsToSerial()
+{
+	Serial.printf("current_file=%s\n", current_file[0] ? current_file : "");
+	Serial.printf("use_rmt=%s\n", g_config.use_rmt ? "Yes" : "No");
+	Serial.printf("speaker_volume=%u\n", g_config.speaker_volume);
+	Serial.printf("brightness=%u\n", g_config.brightness);
+}
+
+static bool setCurrentFileFromSerial(const char* rawName)
+{
+	while (*rawName == ' ' || *rawName == '\t') rawName++;
+	if (*rawName == '\0' || !hasWavExtension(rawName)) return false;
+
+	char path[sizeof(current_file)];
+	if (rawName[0] == '/') {
+		strncpy(path, rawName, sizeof(path) - 1);
+		path[sizeof(path) - 1] = '\0';
+	} else {
+		snprintf(path, sizeof(path), "/%s", rawName);
+	}
+
+	if (!SD.exists(path)) return false;
+
+	strncpy(current_file, path, sizeof(current_file) - 1);
+	current_file[sizeof(current_file) - 1] = '\0';
+	strncpy(g_config.current_file, current_file, sizeof(g_config.current_file) - 1);
+	g_config.current_file[sizeof(g_config.current_file) - 1] = '\0';
+	saveConfig();
+	showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
+	return true;
+}
+
+static void showSdMissingScreen()
+{
+	showStatus("No SD", YELLOW, "Insert card", "Press any key to retry");
+}
+
+static bool initSdCard()
+{
+	SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+	if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
+		printf("SD init failed\r\n");
+		return false;
+	}
+	printf("SD OK - %lluMB\r\n", SD.cardSize() / (1024 * 1024));
+	return true;
+}
+
+bool initAppAfterSdReady()
+{
+	if (app_ready) return true;
+	if (!initSdCard()) {
+		showSdMissingScreen();
+		return false;
+	}
+
+	// 設定ファイル読み込み（なければデフォルト値で新規作成）
+	loadConfig();
+	M5Cardputer.Display.setBrightness(g_config.brightness);
+
+	// カレントファイル初期化（設定ファイルの値を使用）
+	strncpy(current_file, g_config.current_file, sizeof(current_file));
+
+	// RMT スイッチ入力設定（GPIO6: プルアップ = 通常 H）
+	pinMode(RMT_SWITCH_PIN, INPUT_PULLUP);
+
+	// ADC 初期化
+#ifdef USE_PCM1808
+	// PCM1808 Line In  (EXT port: BCK=3, LRCK=4, DIN=5, MCK=13)
+	lineIn.begin(3, 4, 5, 13);
+#else
+	M5Cardputer.Mic.begin();
+#endif
+
+	// FreeRTOS Queue 作成（深さ NUM_BUFFERS+1: ストップシグナル分の余裕を持たせる）
+	rec_queue = xQueueCreate(NUM_BUFFERS + 1, sizeof(uint8_t));
+
+	// sd_task を Core 0 に固定して起動
+	xTaskCreatePinnedToCore(
+		sd_task,   // タスク関数
+		"sd_task", // タスク名
+		4096,      // スタックサイズ (bytes)
+		nullptr,   // 引数
+		1,         // 優先度
+		nullptr,   // タスクハンドル（不要なら nullptr）
+		0          // Core 0
+	);
+
+	app_ready = true;
+	showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
+	return true;
+}
 
 // ============================================================
 // sd_task  ―  Core 0
@@ -348,6 +479,8 @@ void setup(void)
 	auto cfg = M5.config();
 	M5Cardputer.begin(cfg);
 	Serial.begin(115200);
+	Serial.setDebugOutput(true);
+	Serial.println("USB CDC ready");
 
 	// WiFi / BT を無効化して消費電力を削減する（このアプリは無線不使用）
 	WiFi.mode(WIFI_OFF);
@@ -358,48 +491,7 @@ void setup(void)
 	M5Cardputer.Display.setTextDatum(top_center);
 	M5Cardputer.Display.setTextColor(WHITE);
 	M5Cardputer.Display.setFont(&fonts::FreeSansBoldOblique12pt7b);
-
-	// SD カード初期化
-	SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
-	if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
-		printf("SD init failed\r\n");
-		while (1) { delay(1); }
-	}
-	printf("SD OK - %lluMB\r\n", SD.cardSize() / (1024 * 1024));
-
-	// 設定ファイル読み込み（なければデフォルト値で新規作成）
-	loadConfig();
-	M5Cardputer.Display.setBrightness(g_config.brightness);
-
-	// カレントファイル初期化（設定ファイルの値を使用）
-	strncpy(current_file, g_config.current_file, sizeof(current_file));
-
-	// RMT スイッチ入力設定（GPIO6: プルアップ = 通常 H）
-	pinMode(RMT_SWITCH_PIN, INPUT_PULLUP);
-
-	// ADC 初期化
-#ifdef USE_PCM1808
-	// PCM1808 Line In  (EXT port: BCK=3, LRCK=4, DIN=5, MCK=13)
-	lineIn.begin(3, 4, 5, 13);
-#else
-	M5Cardputer.Mic.begin();
-#endif
-
-	// FreeRTOS Queue 作成（深さ NUM_BUFFERS+1: ストップシグナル分の余裕を持たせる）
-	rec_queue = xQueueCreate(NUM_BUFFERS + 1, sizeof(uint8_t));
-
-	// sd_task を Core 0 に固定して起動
-	xTaskCreatePinnedToCore(
-		sd_task,   // タスク関数
-		"sd_task", // タスク名
-		4096,      // スタックサイズ (bytes)
-		nullptr,   // 引数
-		1,         // 優先度
-		nullptr,   // タスクハンドル（不要なら nullptr）
-		0          // Core 0
-	);
-
-	showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
+	if (!initAppAfterSdReady()) return;
 }
 
 // ============================================================
@@ -411,6 +503,8 @@ void setup(void)
 //     S キー          → Settings（設定画面）へ
 //     R キー / BtnA   → REC（新規録音）へ
 //     その他のキー    → PLAY（カレントファイルを再生）へ
+//     Serial P/R/S    → PLAY / REC / Settings
+//     Serial M/N      → use_rmt を即時に切り替えて保存
 //   Browse 状態:
 //     ; / .           → リスト上下移動
 //     ` (Esc)         → カレントファイル変更なしで Ready へ
@@ -422,8 +516,10 @@ void setup(void)
 //     Enter / その他  → 変更を保存して Ready へ
 //   REC 状態:
 //     任意キー        → 録音停止要求（Core 0 が WAV 確定後 PLAY へ）
+//     Serial C        → 録音停止要求
 //   PLAY 状態:
 //     任意キー        → 再生停止して Ready へ
+//     Serial C        → 再生停止
 // ============================================================
 void loop(void)
 {
@@ -450,36 +546,129 @@ void loop(void)
 		if (!w.empty()) pressedChar = w[0];
 		pressedEnter = ks.enter;
 	}
+	char serialCommand = 0;
+	bool serialSetFile = false;
+	while (!pressedChar && !pressedEnter && Serial.available()) {
+		const int inByte = Serial.read();
+		if (inByte < 0) break;
+
+		const char ch = (char)inByte;
+		if (serial_file_pending) {
+			if (ch == '\r') {
+				continue;
+			} else if (ch == '\n') {
+				serial_file_arg[serial_file_arg_len] = '\0';
+				serial_file_pending = false;
+				serialSetFile = true;
+				break;
+			} else if ((ch == '\b' || ch == 0x7F) && serial_file_arg_len > 0) {
+				serial_file_arg_len--;
+			} else if (serial_file_arg_len + 1 < sizeof(serial_file_arg)) {
+				serial_file_arg[serial_file_arg_len++] = ch;
+			}
+			continue;
+		}
+
+		if (ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t') continue;
+
+		const char normalized = (char)toupper((unsigned char)ch);
+		switch (normalized) {
+			case 'P':
+			case 'R':
+			case 'S':
+			case 'I':
+			case 'Z':
+			case 'C':
+			case 'M':
+			case 'N':
+			case 'L':
+				serialCommand = normalized;
+				Serial.printf("Serial cmd: %c\n", serialCommand);
+				break;
+			case 'F':
+				serial_file_pending = true;
+				serial_file_arg_len = 0;
+				break;
+		}
+
+		if (serialCommand != 0) break;
+	}
 	const bool trigger   = M5Cardputer.BtnA.wasClicked() || (pressedChar != 0) || pressedEnter;
 	const bool trigger_f = (pressedChar == 'f' || pressedChar == 'F');
 	const bool trigger_r = M5Cardputer.BtnA.wasClicked() ||
 	                       (pressedChar == 'r' || pressedChar == 'R');
 	const bool trigger_s = (pressedChar == 's' || pressedChar == 'S');
+	const bool serial_list = (serialCommand == 'L');
+	const bool serial_is_playing = (serialCommand == 'I');
+	const bool serial_reset = (serialCommand == 'Z');
+	const bool serial_play   = (serialCommand == 'P');
+	const bool serial_record = (serialCommand == 'R');
+	const bool serial_settings = (serialCommand == 'S');
+	const bool serial_cancel = (serialCommand == 'C');
+	const bool serial_rmt_on = (serialCommand == 'M');
+	const bool serial_rmt_off = (serialCommand == 'N');
+	const bool serial_ready_command = serial_play || serial_record || serial_settings || serial_list || serial_is_playing || serial_reset || serialSetFile ||
+	                                  serial_rmt_on || serial_rmt_off;
 
-	if (trigger) {
+	if (!app_ready) {
+		if ((trigger || serial_ready_command || serial_cancel) && !initAppAfterSdReady()) {
+			showSdMissingScreen();
+		}
+		return;
+	}
+
+	if (serialSetFile) {
+		const bool updated = !is_recording && !is_playing && !is_browsing && !is_settings &&
+		                     !rmt_waiting && !rmt_play_waiting &&
+		                     setCurrentFileFromSerial(serial_file_arg);
+		Serial.println(updated ? "OK" : "FAIL");
+		serial_file_arg_len = 0;
+	}
+
+	if (serial_list) {
+		listRootWavFilesToSerial();
+	}
+
+	if (serial_settings) {
+		printSettingsToSerial();
+	}
+
+	if (serial_is_playing) {
+		Serial.println(is_playing ? "Y" : "N");
+	}
+
+	if (serial_reset) {
+		Serial.println("RESET");
+		Serial.flush();
+		ESP.restart();
+	}
+
+	if (trigger || serial_ready_command || serial_cancel) {
 		if (is_playing) {
-			// ── 再生停止 ──────────────────────────────────────────
-			M5Cardputer.Speaker.stop();
-			M5Cardputer.Speaker.end();
-			play_file.close();
-			is_playing = false;
-			showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
-			printf("Playback stopped by user.\n");
+			if (trigger || serial_cancel) {
+				// ── 再生停止 ──────────────────────────────────────────
+				M5Cardputer.Speaker.stop();
+				M5Cardputer.Speaker.end();
+				play_file.close();
+				is_playing = false;
+				showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
+				printf("Playback stopped by user.\n");
+			}
 		} else if (is_browsing) {
-			if (pressedChar == ';') {
+			if (trigger && pressedChar == ';') {
 				// ── ブラウザ: 上に移動 ─────────────────────────────
 				browseMoveUp();
 				showFileBrowser();
-			} else if (pressedChar == '.') {
+			} else if (trigger && pressedChar == '.') {
 				// ── ブラウザ: 下に移動 ─────────────────────────────
 				browseMoveDown();
 				showFileBrowser();
-			} else if (pressedChar == '`') {
+			} else if (trigger && pressedChar == '`') {
 				// ── ブラウザ → Ready（Esc: 選択変更なし）──────────
 				is_browsing = false;
 				showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
 				printf("Browse cancelled.\n");
-			} else {
+			} else if (trigger) {
 				// ── ブラウザ → Ready（決定: カレントファイル更新）──
 				const char* sel = browseSelectedFile();
 				if (sel) {
@@ -493,36 +682,40 @@ void loop(void)
 				printf("Browse selected: %s\n", current_file);
 			}
 		} else if (rmt_waiting) {
-			// ── RMT 録音待機キャンセル ────────────────────────────
-			rmt_waiting = false;
-			showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
-			printf("RMT wait cancelled.\n");
+			if (trigger || serial_cancel) {
+				// ── RMT 録音待機キャンセル ────────────────────────────
+				rmt_waiting = false;
+				showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
+				printf("RMT wait cancelled.\n");
+			}
 		} else if (rmt_play_waiting) {
-			// ── RMT 再生待機キャンセル ────────────────────────────
-			rmt_play_waiting = false;
-			showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
-			printf("RMT play wait cancelled.\n");
+			if (trigger || serial_cancel) {
+				// ── RMT 再生待機キャンセル ────────────────────────────
+				rmt_play_waiting = false;
+				showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
+				printf("RMT play wait cancelled.\n");
+			}
 		} else if (is_settings) {
 			// ── 設定画面: キー入力処理 ──────────────────────────────
-			if (pressedChar == ';') {
+			if (trigger && pressedChar == ';') {
 				settingsMoveUp();
 				showSettingsScreen();
-			} else if (pressedChar == '.') {
+			} else if (trigger && pressedChar == '.') {
 				settingsMoveDown();
 				showSettingsScreen();
-			} else if (pressedChar == ',') {
+			} else if (trigger && pressedChar == ',') {
 				settingsChange(false);
 				showSettingsScreen();
-			} else if (pressedChar == '/') {
+			} else if (trigger && pressedChar == '/') {
 				settingsChange(true);
 				showSettingsScreen();
-			} else if (pressedChar == '`') {
+			} else if (trigger && pressedChar == '`') {
 				// ── 設定キャンセル（変更破棄）─────────────────────────
 				is_settings = false;
 				M5Cardputer.Display.setBrightness(g_config.brightness);  // プレビューを元に戻す
 				showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
 				printf("Settings cancelled.\n");
-			} else {
+			} else if (trigger) {
 				// ── 設定保存して閉じる ──────────────────────────────
 				if (settingsCommit()) saveConfig();
 				is_settings = false;
@@ -530,17 +723,24 @@ void loop(void)
 				printf("Settings saved.\n");
 			}
 		} else if (!is_recording) {
-			if (trigger_f) {
+			if (serial_rmt_on || serial_rmt_off) {
+				g_config.use_rmt = serial_rmt_on;
+				saveConfig();
+				showStatus("Ready", WHITE, current_file, "[F]iles [R]ec [S]et Any=Play");
+				printf("RMT %s.\n", g_config.use_rmt ? "enabled" : "disabled");
+			} else if (trigger_f) {
 				// ── ファイルブラウザへ遷移 ────────────────────────
 				is_browsing = true;
 				initFileBrowser(current_file);
 				showFileBrowser();
-				printf("File browser opened.\n");			} else if (trigger_s) {
+				printf("File browser opened.\n");
+			} else if (trigger_s) {
 				// ── 設定画面へ遷移 ──────────────────────────────────────────
 				is_settings = true;
 				initSettingsScreen();
 				showSettingsScreen();
-				printf("Settings opened.\n");			} else if (trigger_r) {
+				printf("Settings opened.\n");
+			} else if (trigger_r || serial_record) {
 				// ── 新規録音開始 ──────────────────────────────────
 				if (g_config.use_rmt) {
 					// RMT モード: 常に待機状態へ遷移（G6 がすでに LOW なら
@@ -553,7 +753,7 @@ void loop(void)
 					is_recording = true;
 #ifdef USE_PCM1808
 					// 録音開始後 I2S ADC を再初期化（PLAY 時に lineIn.end() しているため）
-					lineIn.begin(3, 4, 5, 13);
+					lineIn.begin(3, 4, 5, 13, SAMPLE_RATE);
 #endif
 					resetVUMeter();
 					showStatus("REC", RED, "", "Press any key to stop");
@@ -562,7 +762,38 @@ void loop(void)
 				} else {
 					printf("Failed to start recording.\n");
 				}
-			} else {
+			} else if (serial_play) {
+				// ── カレントファイルを再生 ────────────────────────
+				if (current_file[0] == '\0' || !SD.exists(current_file)) {
+					showStatus("No file", YELLOW, "(none)", "[R] Rec  [F] Browse");
+					printf("No playable file.\n");
+				} else if (g_config.use_rmt) {
+					// RMT モード: G6=L 待機（すでに LOW ならループ末で即座開始）
+					rmt_play_waiting = true;
+					showStatus("RMT Wait", YELLOW, current_file, "Waiting for switch  [any key] Cancel");
+					printf("RMT play wait entered: G6_raw=%d debounced=%d\n",
+					       digitalRead(RMT_SWITCH_PIN), rmt_debounced);
+				} else {
+					uint32_t total_samples = 0;
+					{
+						File f = SD.open(current_file, FILE_READ);
+						if (f) {
+							WAVHeader hdr;
+							f.read(reinterpret_cast<uint8_t*>(&hdr), sizeof(WAVHeader));
+							total_samples = hdr.dataSize / sizeof(int16_t);
+							f.close();
+						}
+					}
+					rec_total_samples = total_samples;
+					is_playing = true;
+					showStatus("PLAY", BLUE, current_file, "Press any key to stop");
+					resetVUMeter();
+					startPlayback(current_file);
+					drawTimeIndicator(0, total_samples / SAMPLE_RATE);
+					drawVUMeter(0.0f);
+					printf("Playing: %s\n", current_file);
+				}
+			} else if (trigger) {
 				// ── カレントファイルを再生 ────────────────────────
 				if (current_file[0] == '\0' || !SD.exists(current_file)) {
 					showStatus("No file", YELLOW, "(none)", "[R] Rec  [F] Browse");
@@ -594,7 +825,7 @@ void loop(void)
 					printf("Playing: %s\n", current_file);
 				}
 			}
-		} else {
+		} else if (trigger || serial_cancel) {
 			// ── 録音停止要求 ──────────────────────────────────────
 			stop_requested = true;
 			printf("Stop requested.\n");
@@ -666,7 +897,7 @@ void loop(void)
 			if (openRecFile()) {
 				is_recording = true;
 #ifdef USE_PCM1808
-				lineIn.begin(3, 4, 5, 13);
+				lineIn.begin(3, 4, 5, 13, SAMPLE_RATE);
 #endif
 				resetVUMeter();
 				showStatus("REC", RED, "", "Press any key to stop");

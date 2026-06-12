@@ -2,60 +2,136 @@
 
 JA
 
-M5Cardputer オーディオキャプチャ。内蔵マイクおよび Cardputer-ADV EXT 端子に接続した PMC1808 に対応します。レトロパソコンのカセットテープインターフェイスに接続して使用するケースを想定しています。
+![m5cp-audio UI](./media/cpaudio1.png)
 
-## 基本機能
+M5Cardputer-ADV を、レトロパソコン向けカセットインターフェイスの録音・再生機として使うためのソフトです。
 
-- 16kHz / モノ / 16bit リニア PCM
+このアプリでできること:
+- カセット用音声信号を録音して WAV 保存・再生
+- RMT 端子で開始/停止を制御
+
+必要なハードウェア構成:
+- 再生のみ: M5Cardputer + SD カード
+- 録音も使う: PCM1808 モジュールの追加が必要です
+
+**リリース**: 0.1.0
+
+**M5Burner Share**: X2S7RMCggJOnHdi8
+
+## 機能と仕様
+
+レトロパソコンのカセットテープインターフェイス（録音・再生・リモート端子）に接続して使用します。再生だけなら PCM1808 ボードは不要です。
+
+- 44.1kHz / モノ / 16bit リニア PCM
 - SD カードに WAV 形式で保存
-- 入力：PC1808 ライン入力または内蔵マイク（`#define USE_PCM1808` でコンパイル時切替え）
-- 出力：M5Cardputer-adv ライン出力または内蔵スピーカー（HW切り替え式）
-- 録音中の VU メーター表示（FL 管風 24 セグメント）
-- SD カードファイルブラウザ
-- RMT 端子対応（リレースイッチで録音開始/停止）
+- 入力：PCM1808 ライン入力
+- 出力：M5Cardputer-adv ライン出力
+- VU メーター表示
+- 簡易 SD カードファイルブラウザ
+- RMT 端子対応
 - 設定画面（S キー）で各パラメータを変更・保存
 
-（以下は To Do）
+## 準備するもの
 
-- ファイル別に再生時出力レベル設定を保存可能
+- M5Cardputer-ADV 本体
+- SD カード（WAV ファイルを保存）
+- 3.5mm ステレオミニプラグ - L/R スプリッタ
 
-## EXT 端子接続
+録音機能を使う場合は PCM1808 モジュールを使った回路を組む必要があります。
+「配線」の節を参照してください。
 
-PCM1808
+M5Cardputer-ADV の音声出力端子に 3.5mm モノラルプラグを刺すと音声が出力されない場合があります。この場合はステレオミニプラグによる L/R スプリッタを使用してください。出力は L チャネルに出ます。
 
-- BCK=G3
-- LRCK=G4
-- DIN=G5 
-- MCK=G13
+## 配線
 
-RMT 端子
-- G6 Tip — リレースイッチ（常開）の片端
-- GND Ring — リレースイッチのもう片端
-- GPIO6 は INPUT_PULLUP（通常 H、スイッチ ON で L）
-- デバウンス: 80 ms（金属バネ式リレー対応）
+録音機能を使う場合は PCM1808 モジュールを使った回路を組む必要があります。
+現在専用基板は用意していないので、市販の PCM1808 モジュールを配線して使用してください。
 
-注：ジャック配線によりプラグ未接続時は Tip-Ring 短絡となっているため、「Rec 開始時最初から L だった場合はすぐに録音開始」を実装
+### 必要な部品
 
-## PCM1808 パラメータ
+- PCM1808 モジュール
+- 3.5mm モノラルジャック（録音単子用）
+- 2.5mm ジャック（RMT 用）
+- 必要に応じて電圧変換基板
 
-- SCLK = 256fs = 4.096MHz
-- MCLK = 512fs = 8.192MHz
-- LRCK = 16kHz
-- ADC 出力フォーマット = I2S 16bit
+### PCM1808（EXT 端子）
 
-```cpp
-    i2s_config_t cfg = {
-        .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-        .sample_rate          = sample_rate,
-        .bits_per_sample      = I2S_BITS_PER_SAMPLE_32BIT,
-        .channel_format       = I2S_CHANNEL_FMT_ONLY_RIGHT, 
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count        = 4,
-        .dma_buf_len          = 256,
-        .use_apll             = false,
-        .tx_desc_auto_clear   = false,
-        .fixed_mclk           = 0,
-        .mclk_multiple        = I2S_MCLK_MULTIPLE_384, 
-    };
-```
+ピンアウトは Cardputer-ADV EXT 端子のものです。
+
+- G3 = BCK
+- G4 = LRCK
+- G5 = DIN
+- G13 = MCK
+- GND = GND
+- Vcc = Vcc
+
+3.3V 電源が必要な PC1808 モジュールを使用する場合は、EXT 端子から供給される 5V 電源を 3.3V に変換するミニ基板への配線も必要です。
+
+### RMT 端子
+
+2.5mm リモートジャックに配線します。
+
+- G6 = Tip
+- GND = Ring
+
+G6（GPIO6）は INPUT_PULLUP 設定で使用します（解放時 H、リモートスイッチ ON で L）。
+
+## 使い方（本体キー）
+
+### Ready 画面
+
+- R キー / BtnA: 録音開始
+- F キー: ファイルブラウザ
+- S キー: 設定画面
+- その他のキー: 現在ファイルを再生
+
+### Browse 画面
+
+- ; / . （上/下）: 選択移動
+- ` （Esc）: キャンセルして戻る
+- Enter またはその他キー: 選択を確定して戻る
+
+### Settings 画面
+
+- ; / . （上/下）: 項目移動
+- , / / （減/増）: 値変更
+- ` （Esc）: キャンセル（変更破棄）
+- Enter またはその他キー: 保存して戻る
+
+### REC / PLAY 中
+
+- 任意キーで停止
+
+## 設定項目
+
+Settings 画面で変更・保存できる項目は以下の通りです。
+
+- use_rmt: RMT スイッチを使うか
+- spkr_volume: スピーカー音量（0-255）
+- brightness: 画面輝度（10-255）
+
+## シリアルコマンド
+
+PC からのスクリプト制御が必要な場合、シリアルで以下のコマンドが使用できます。
+
+- P: 再生
+- R: 録音
+- C: 停止
+- S: 設定表示
+- L: WAV ファイル一覧表示
+- I: 再生中かを Y/N で返す
+- M / N: RMT 使用を ON/OFF して保存
+- F <fname.wav>: カレントファイル設定
+- Z: リセット
+
+## 注意事項
+
+- SD カードのルートにある WAV ファイルのみ認識されます。
+- 録音 WAV ファイルは自動的に命名されます。
+- 設定画面で任意の WAV ファイルを再生用セットできます。
+- 本ファームウェアではファイルの名前変更、削除、移動はできません。SD カードを PC にセットして操作するか、M5Launcher をご利用ください。
+
+## ライセンス
+
+[MIT License](./LICENSE)
+
