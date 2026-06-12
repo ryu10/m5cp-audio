@@ -76,6 +76,8 @@ M5Cardputer-ADV の音声出力端子に 3.5mm モノラルプラグを刺すと
 
 G6（GPIO6）は INPUT_PULLUP 設定で使用します（解放時 H、リモートスイッチ ON で L）。
 
+![RMT 端子配線](./media/IMG_3510.png)
+
 ## 使い方（本体キー）
 
 ### Ready 画面
